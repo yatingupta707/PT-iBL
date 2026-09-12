@@ -1,0 +1,15 @@
+{
+  "completed_models": [],
+  "run_name": "exp1",
+  "n_epochs": 15,
+  "optimizer": "de",
+  "n_agents": 10,
+  "r_weight": 0.5,
+  "models": [
+    "PTiBL",
+    "IBLQuantum",
+    "PTIBLQuantum"
+  ],
+  "started_at": "2026-08-12T17:47:14",
+  "updated_at": "2026-08-12T17:47:14"
+}

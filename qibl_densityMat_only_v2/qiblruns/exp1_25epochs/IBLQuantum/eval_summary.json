@@ -1,0 +1,38 @@
+{
+  "model": "IBLQuantum",
+  "n_sims": 5,
+  "n_agents": 20,
+  "elapsed_s": 67.4,
+  "params": {
+    "d": 1.129296,
+    "sigma_s": 0.54427,
+    "tau": 0.100387,
+    "beta_q": 9.311187,
+    "theta": 0.015294,
+    "omega": 0.294251,
+    "eta_delta": 0.578206,
+    "eta_c": 0.741205,
+    "lambda_d": 0.703014
+  },
+  "train": {
+    "r_rate": {
+      "msd": 0.006506,
+      "corr": 0.9478
+    },
+    "a_rate": {
+      "msd": 0.007401,
+      "corr": 0.6879
+    }
+  },
+  "test": {
+    "r_rate": {
+      "msd": 0.005755,
+      "corr": 0.9484
+    },
+    "a_rate": {
+      "msd": 0.007376,
+      "corr": 0.7241
+    }
+  },
+  "evaluated_at": "2026-08-13T08:53:00"
+}

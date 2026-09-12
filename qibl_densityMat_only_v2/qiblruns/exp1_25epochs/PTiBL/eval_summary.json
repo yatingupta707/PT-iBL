@@ -1,0 +1,35 @@
+{
+  "model": "PTiBL",
+  "n_sims": 5,
+  "n_agents": 20,
+  "elapsed_s": 41.0,
+  "params": {
+    "alpha": 0.888397,
+    "lambda_": 8.46905,
+    "d": 1.914293,
+    "sigma_s": 0.712279,
+    "tau": 0.103716,
+    "kappa": 8.456615
+  },
+  "train": {
+    "r_rate": {
+      "msd": 0.003173,
+      "corr": 0.9543
+    },
+    "a_rate": {
+      "msd": 0.005262,
+      "corr": 0.7984
+    }
+  },
+  "test": {
+    "r_rate": {
+      "msd": 0.001893,
+      "corr": 0.9559
+    },
+    "a_rate": {
+      "msd": 0.004589,
+      "corr": 0.8235
+    }
+  },
+  "evaluated_at": "2026-08-13T08:54:49"
+}

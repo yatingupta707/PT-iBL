@@ -1,0 +1,22 @@
+{
+  "model": "IBLQuantum",
+  "optimizer": "de",
+  "n_epochs": 30,
+  "n_agents": 15,
+  "r_weight": 0.5,
+  "train_total_msd": 0.003359,
+  "train_r_msd": 0.000826,
+  "train_a_msd": 0.005892,
+  "params": {
+    "d": 1.897915,
+    "sigma_s": 0.703083,
+    "tau": 0.105068,
+    "beta_q": 8.228743,
+    "theta": 0.028413,
+    "omega": 0.091632,
+    "eta_delta": 0.529406,
+    "eta_c": 0.587028,
+    "lambda_d": 0.209642
+  },
+  "fitted_at": "2026-08-12T19:10:11"
+}

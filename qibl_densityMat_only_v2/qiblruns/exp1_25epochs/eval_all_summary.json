@@ -1,0 +1,115 @@
+{
+  "IBLQuantum": {
+    "model": "IBLQuantum",
+    "n_sims": 5,
+    "n_agents": 20,
+    "elapsed_s": 67.4,
+    "params": {
+      "d": 1.129296,
+      "sigma_s": 0.54427,
+      "tau": 0.100387,
+      "beta_q": 9.311187,
+      "theta": 0.015294,
+      "omega": 0.294251,
+      "eta_delta": 0.578206,
+      "eta_c": 0.741205,
+      "lambda_d": 0.703014
+    },
+    "train": {
+      "r_rate": {
+        "msd": 0.006506,
+        "corr": 0.9478
+      },
+      "a_rate": {
+        "msd": 0.007401,
+        "corr": 0.6879
+      }
+    },
+    "test": {
+      "r_rate": {
+        "msd": 0.005755,
+        "corr": 0.9484
+      },
+      "a_rate": {
+        "msd": 0.007376,
+        "corr": 0.7241
+      }
+    },
+    "evaluated_at": "2026-08-13T08:53:00"
+  },
+  "PTIBLQuantum": {
+    "model": "PTIBLQuantum",
+    "n_sims": 5,
+    "n_agents": 20,
+    "elapsed_s": 67.8,
+    "params": {
+      "alpha": 0.977456,
+      "lambda_": 5.844143,
+      "d": 1.50542,
+      "sigma_s": 0.599792,
+      "tau": 0.105626,
+      "beta_q": 7.152203,
+      "theta": 0.047938,
+      "omega": 0.56268,
+      "eta_delta": 0.500496,
+      "eta_c": 0.573123,
+      "lambda_d": 0.457169
+    },
+    "train": {
+      "r_rate": {
+        "msd": 0.004273,
+        "corr": 0.9575
+      },
+      "a_rate": {
+        "msd": 0.005769,
+        "corr": 0.7784
+      }
+    },
+    "test": {
+      "r_rate": {
+        "msd": 0.002474,
+        "corr": 0.9575
+      },
+      "a_rate": {
+        "msd": 0.005216,
+        "corr": 0.8034
+      }
+    },
+    "evaluated_at": "2026-08-13T08:54:08"
+  },
+  "PTiBL": {
+    "model": "PTiBL",
+    "n_sims": 5,
+    "n_agents": 20,
+    "elapsed_s": 41.0,
+    "params": {
+      "alpha": 0.888397,
+      "lambda_": 8.46905,
+      "d": 1.914293,
+      "sigma_s": 0.712279,
+      "tau": 0.103716,
+      "kappa": 8.456615
+    },
+    "train": {
+      "r_rate": {
+        "msd": 0.003173,
+        "corr": 0.9543
+      },
+      "a_rate": {
+        "msd": 0.005262,
+        "corr": 0.7984
+      }
+    },
+    "test": {
+      "r_rate": {
+        "msd": 0.001893,
+        "corr": 0.9559
+      },
+      "a_rate": {
+        "msd": 0.004589,
+        "corr": 0.8235
+      }
+    },
+    "evaluated_at": "2026-08-13T08:54:49"
+  }
+}

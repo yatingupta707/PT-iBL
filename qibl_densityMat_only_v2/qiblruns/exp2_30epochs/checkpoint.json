@@ -1,0 +1,22 @@
+{
+  "completed_models": [
+    "PTiBL",
+    "IBLQuantum",
+    "PTIBLQuantum"
+  ],
+  "run_name": "exp2",
+  "n_epochs": 30,
+  "optimizer": "de",
+  "n_agents": 15,
+  "r_weight": 0.5,
+  "models": [
+    "PTiBL",
+    "IBLQuantum",
+    "PTIBLQuantum"
+  ],
+  "started_at": "2026-08-12T18:35:16",
+  "updated_at": "2026-08-12T19:42:19",
+  "PTiBL_completed_at": "2026-08-12T18:45:31",
+  "IBLQuantum_completed_at": "2026-08-12T19:10:11",
+  "PTIBLQuantum_completed_at": "2026-08-12T19:42:19"
+}

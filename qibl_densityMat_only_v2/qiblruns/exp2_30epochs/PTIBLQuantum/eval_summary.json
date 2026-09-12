@@ -1,0 +1,40 @@
+{
+  "model": "PTIBLQuantum",
+  "n_sims": 5,
+  "n_agents": 20,
+  "elapsed_s": 67.3,
+  "params": {
+    "alpha": 0.962391,
+    "lambda_": 6.204411,
+    "d": 1.472702,
+    "sigma_s": 0.605007,
+    "tau": 0.116551,
+    "beta_q": 6.96715,
+    "theta": 0.022393,
+    "omega": 0.075565,
+    "eta_delta": 0.700651,
+    "eta_c": 0.169757,
+    "lambda_d": 0.0883
+  },
+  "train": {
+    "r_rate": {
+      "msd": 0.004083,
+      "corr": 0.9537
+    },
+    "a_rate": {
+      "msd": 0.005558,
+      "corr": 0.7794
+    }
+  },
+  "test": {
+    "r_rate": {
+      "msd": 0.002537,
+      "corr": 0.957
+    },
+    "a_rate": {
+      "msd": 0.005054,
+      "corr": 0.8001
+    }
+  },
+  "evaluated_at": "2026-08-13T08:49:09"
+}

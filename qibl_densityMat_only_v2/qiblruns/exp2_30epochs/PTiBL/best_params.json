@@ -1,0 +1,19 @@
+{
+  "model": "PTiBL",
+  "optimizer": "de",
+  "n_epochs": 30,
+  "n_agents": 15,
+  "r_weight": 0.5,
+  "train_total_msd": 0.002948,
+  "train_r_msd": 0.001058,
+  "train_a_msd": 0.004839,
+  "params": {
+    "alpha": 0.956851,
+    "lambda_": 7.890062,
+    "d": 1.971403,
+    "sigma_s": 0.772523,
+    "tau": 0.118287,
+    "kappa": 8.392771
+  },
+  "fitted_at": "2026-08-12T18:45:31"
+}
