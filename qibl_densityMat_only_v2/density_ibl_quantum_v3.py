@@ -10,12 +10,12 @@ Inspired by ibl_and_pt_re_parallel.py.
 USAGE
 ------
   python density_ibl_quantum_v3.py
-      (saves to runs/iteration_2 by default)
+      (saves to runs/iteration_3 by default)
 
   python density_ibl_quantum_v3.py \\
-      --run-name iteration_2 --n-epochs 100 --n-agents 10 --pop-size 15 \\
-      --optimizer de --shape-weight 0.002 \\
-      --warm-start runs/iteration1_50epochs \\
+      --run-name iteration_3 --n-epochs 100 --n-agents 10 --pop-size 15 \\
+      --optimizer de --shape-weight 0.1 --score-window 5 \\
+      --warm-start runs/iteration_2 \\
       --models IBL PTiBL IBLQuantum PTIBLQuantum
 
 RESUME AFTER CRASH (checkpoint system)
@@ -55,6 +55,7 @@ from models import (PTiBL, IBLQuantum, PTIBLQuantum, iBL, ALL_MODELS,
 from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp, human_reveal_ts_est,
+    human_r_inst_est, human_a_inst_est, human_reveal_inst_est,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -65,7 +66,8 @@ COLS      = ['id', 'val_high', 'p_high', 'val_low', 'val_safe', 'sure', 'd1', 'm
 N_TRIALS  = len(human_r_ts_est)
 N_AGENTS  = int(os.environ.get('PTIBL_N_AGENTS', '5'))
 R_WEIGHT  = float(os.environ.get('PTIBL_R_WEIGHT', '0.5'))
-SHAPE_WEIGHT = float(os.environ.get('PTIBL_SHAPE_WEIGHT', '0.002'))
+SHAPE_WEIGHT = float(os.environ.get('PTIBL_SHAPE_WEIGHT', '0.1'))
+SCORE_WINDOW = int(os.environ.get('PTIBL_SCORE_WINDOW', '5'))
 _DATA_DIR = os.environ.get('PTIBL_DATA_DIR', 'data')
 
 
@@ -112,16 +114,41 @@ def _run_one_problem(model_class, params, row, n_agents: int, seed_base: int = 0
     return R.mean(axis=0), A.mean(axis=0), V.mean(axis=0)
 
 
+def windowed_mean(x, window=5):
+    """Trailing-window average. window<=0 or window>=len(x) → full-history cummean."""
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    if n == 0:
+        return x
+    if window is None or int(window) <= 0:
+        div = np.arange(1, n + 1, dtype=float)
+        return np.cumsum(x) / div
+    w = int(window)
+    out = np.empty(n, dtype=float)
+    for t in range(n):
+        lo = max(0, t - w + 1)
+        out[t] = x[lo:t + 1].mean()
+    return out
+
+
+def _smooth_ts(inst):
+    """Apply the training scoring transform to an instantaneous series."""
+    return windowed_mean(inst, SCORE_WINDOW)
+
+
 def eval_ts(dataset: pd.DataFrame, model_class, params: dict,
              n_agents: int = 5) -> tuple:
     """
-    Compute cumulative R-rate and A-rate time series averaged over all
-    problems in the dataset.
+    Compute R-rate and A-rate time series averaged over all problems.
+
+    Instantaneous rates are smoothed with a trailing window (SCORE_WINDOW)
+    before being returned. SCORE_WINDOW<=0 restores full-history cumulative
+    means. Plots/evaluate.py still use cumulative; only the training loss
+    uses this transform.
 
     Returns
     -------
-    (r_cum, a_cum) — each shape (N_TRIALS,)
-        cumulative mean up to each trial, averaged over problems and agents
+    (r_ts, a_ts, v_ts) — each shape (N_TRIALS,)
     """
     P     = len(dataset)
     r_acc = np.zeros(N_TRIALS)
@@ -137,13 +164,7 @@ def eval_ts(dataset: pd.DataFrame, model_class, params: dict,
     r_inst = r_acc / P
     a_inst = a_acc / P
     v_inst = v_acc / P
-
-    # Cumulative means (to match the human benchmark format)
-    div   = np.arange(1, N_TRIALS + 1, dtype=float)
-    r_cum = np.cumsum(r_inst) / div
-    a_cum = np.cumsum(a_inst) / div
-    v_cum = np.cumsum(v_inst) / div
-    return r_cum, a_cum, v_cum
+    return _smooth_ts(r_inst), _smooth_ts(a_inst), _smooth_ts(v_inst)
 
 
 def msd(a: np.ndarray, b: np.ndarray) -> float:
@@ -158,18 +179,29 @@ def corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(c) if np.isfinite(c) else 0.0
 
 
+def _human_score_targets():
+    """Human R/A/reveal series under the same transform used for the model."""
+    return (
+        _smooth_ts(human_r_inst_est),
+        _smooth_ts(human_a_inst_est),
+        _smooth_ts(human_reveal_inst_est),
+    )
+
+
 def _score_ts(r_ts, a_ts, v_ts) -> dict:
     """
     Combined loss: MSD (level) + shape penalty (1 − corr) on R and A curves.
 
+    Both sides are already in the training scoring space (windowed by default).
     Reveal stays in the MSD term only: p_reveal is a constant coin-flip, so
     its correlation with a time-varying human series is not identifiable.
     """
-    msd_r  = msd(r_ts, human_r_ts_est)
-    msd_a  = msd(a_ts, human_a_ts_est)
-    msd_v  = msd(v_ts, human_reveal_ts_est)
-    corr_r = corr(r_ts, human_r_ts_est)
-    corr_a = corr(a_ts, human_a_ts_est)
+    h_r, h_a, h_v = _human_score_targets()
+    msd_r  = msd(r_ts, h_r)
+    msd_a  = msd(a_ts, h_a)
+    msd_v  = msd(v_ts, h_v)
+    corr_r = corr(r_ts, h_r)
+    corr_a = corr(a_ts, h_a)
     msd_term   = R_WEIGHT * msd_r + (1.0 - R_WEIGHT) * (msd_a + msd_v) / 2.0
     shape_term = R_WEIGHT * (1.0 - corr_r) + (1.0 - R_WEIGHT) * (1.0 - corr_a)
     return {
@@ -310,7 +342,8 @@ def train_model(model_name: str, model_dir: str,
             json.dump(loss_history, f, indent=2)
 
         print(f"[{model_name}] Gen {_gen[0]:3d} | "
-              f"loss={sc['total']:.5f}  r_msd={sc['msd_r']:.5f}  "
+              f"loss={sc['total']:.5f}  msd={sc['msd_term']:.5f}  "
+              f"shape={sc['shape_term']:.3f}  "
               f"r_corr={sc['corr_r']:+.3f}  a_corr={sc['corr_a']:+.3f}")
         return False
 
@@ -394,6 +427,7 @@ def train_model(model_name: str, model_dir: str,
         'n_agents':         N_AGENTS,
         'r_weight':         R_WEIGHT,
         'shape_weight':     SHAPE_WEIGHT,
+        'score_window':     SCORE_WINDOW,
         'warm_start':       warm_dir,
         'train_total_loss': round(best_loss, 6),
         'train_total_msd':  round(sc_final['msd_term'], 6),
@@ -443,85 +477,69 @@ Notes for this training run. Written when the run directory was created.
 
 ## Goal
 
-Fit model **R-rate and A-rate curves** to the human curves, not just drive
-MSD down. Keep the same Monte Carlo budget (`n_agents={args.n_agents}`) so a
-better fit means better **parameters**, not extra averaging.
+Fit **curve shape**, not just average level. iteration_2 still scored on
+full-history cumulative R/A rates, so a wrong early level could not be
+corrected later, and `shape_weight=0.002` let MSD dominate the loss.
+This run changes both.
 
-`iteration1_50epochs` had low MSD but **negative R-rate correlation**
-(about -0.66 to -0.87): the curves sat near the right average level while
-trending the wrong way. This run targets that.
+## What changed versus iteration 2
 
-## What changed versus iteration 1
+### 1. Windowed scoring instead of full-history cumulative
 
-### 1. Independent IBL memory noise per agent
+The training loss now uses a trailing-window mean of the instantaneous
+rates (`r_inst` / `a_inst`), applied identically to the model and to the
+human series recomputed from raw `risk_series` / `alt_series`:
 
-`IBLMemory` always used `seed=0`, so the 10 agents did not have independent
-activation noise. Each agent now gets its own memory RNG, split from the
-simulate seed (memory stream and choice/outcome stream are separate).
+```
+score[t] = mean(inst[max(0, t-window+1) : t+1])
+window   = {args.score_window}   (0 would restore full-history cumulative)
+```
 
-### 2. PTIBLQuantum bounds aligned with PTiBL
+Cumulative series stay in `evaluate.py` / `plot_results.py` for the
+final figures. They are no longer what DE minimises.
 
-iteration 1 pinned several parameters to walls that were too tight:
-
-- `lambda_` was capped at 1.0 (PTiBL allows 5.0; PT default is 2.25)
-- `d` max was 2.0 and `sigma_s` max was 2.0 (now 5.0, same as PTiBL)
-- `tau` floor lowered from 0.1 to 0.05 so it is not glued to the bound
-
-### 3. Warm-start from iteration 1
-
-`--warm-start {args.warm_start}` injects each model's `best_params.json`
-into the DE population, plus jittered copies, then fills the rest with a
-latin hypercube. Search continues from a known point instead of starting
-from scratch.
-
-### 4. Shape term in the loss (curve matching)
+### 2. Shape term actually counts
 
 ```
 loss = MSD_term + shape_weight * [r_weight * (1 - R-corr)
                                   + (1 - r_weight) * (1 - A-corr)]
 ```
 
-- `shape_weight = {args.shape_weight}`
+- `shape_weight = {args.shape_weight}`  (iteration_2 used 0.002)
 - `r_weight = {args.r_weight}`
-- Reveal stays in the MSD term only (`p_reveal` is still a constant coin
-  flip, so its correlation with a time-varying human series is not useful)
+- Reveal stays in the MSD term only (`p_reveal` is a constant coin-flip)
 
-Watch **R-corr** in the training log. The target is positive and rising.
+Watch **R-corr** in the training log. The target is positive.
 
-### 5. Search settings (not more agents)
+### 3. Warm-start from iteration 2
 
-| setting        | iteration 1 | this run |
+`--warm-start {args.warm_start}` injects each model's `best_params.json`
+into the DE population.
+
+## Search settings
+
+| setting        | iteration 2 | this run |
 |----------------|-------------|----------|
+| scoring        | cumulative  | window-{args.score_window} |
+| shape_weight   | 0.002       | {args.shape_weight} |
 | n_agents       | 10          | {args.n_agents} |
-| pop_size       | 10          | {args.pop_size} |
-| n_epochs       | 50          | {args.n_epochs} |
-| optimizer      | de+nm       | {args.optimizer} |
-| DE tol         | 1e-4        | 1e-6 |
-| shape_weight   | 0 (MSD only)| {args.shape_weight} |
-| warm_start     | none        | {args.warm_start} |
-
-`pop_size` is the DE population multiplier (search budget), not agents.
-Nelder-Mead is off by default here because on iteration 1 it barely moved
-the parameters (noise, not a real improvement).
+| pop_size       | 15          | {args.pop_size} |
+| n_epochs       | 100         | {args.n_epochs} |
+| optimizer      | de          | {args.optimizer} |
+| warm_start     | iteration1  | {args.warm_start} |
 
 ## What did not change
 
 - `n_agents` stayed at {args.n_agents} on purpose
-- `evaluate.py` output (`eval_*.npy`, `eval_summary.json`)
-- `plot_results.py` output structure:
-  - `plot_estimation_set.png`
-  - `plot_competition_set.png`
-  - `plot_tDCS_0_load_0.png`
-  - `plot_tDCS_0_load_1.png`
-  - `plot_tDCS_1_load_0.png`
-  - `plot_tDCS_1_load_1.png`
-  All models on the same axes, two graphs per figure (R-rate | A-rate).
+- `evaluate.py` / `plot_results.py` still plot full-history cumulative
+- Reveal is still R=0 in the R-rate (same coding as the human `risk_series`)
 
 ## How to evaluate and plot
 
 ```
 python evaluate.py --run-dir {run_dir} --n-sims 5 --n-agents 20
 python plot_results.py --run-dir {run_dir} --no-show
+python debug_loss_isolated.py --run-dir {run_dir}
 ```
 
 ## Models
@@ -547,8 +565,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Train PT-IBL-Quantum model family on estimation set.'
     )
-    parser.add_argument('--run-name',   default='iteration_2',
-                         help='Run folder name under --runs-dir (default: iteration_2)')
+    parser.add_argument('--run-name',   default='iteration_3',
+                         help='Run folder name under --runs-dir (default: iteration_3)')
     parser.add_argument('--n-epochs',   type=int, default=100,
                          help='DE maxiter (number of generations)')
     parser.add_argument('--n-agents',   type=int, default=10,
@@ -558,12 +576,15 @@ def main():
                               'This is search budget, not Monte Carlo agents.')
     parser.add_argument('--r-weight',   type=float, default=0.5,
                          help='Weight on R-rate vs A/reveal (0-1)')
-    parser.add_argument('--shape-weight', type=float, default=0.002,
+    parser.add_argument('--shape-weight', type=float, default=0.1,
                          help='Weight on (1 - corr) so the optimizer matches curve '
                               'shape, not only MSD level. 0 disables the shape term.')
-    parser.add_argument('--warm-start', default='runs/iteration1_50epochs',
+    parser.add_argument('--score-window', type=int, default=5,
+                         help='Trailing-window length used for the training loss. '
+                              '5 = last 5 trials; 0 = full-history cumulative (old behaviour).')
+    parser.add_argument('--warm-start', default='runs/iteration_2',
                          help='Previous run directory whose best_params.json seed the '
-                              'DE population (e.g. runs/iteration1_50epochs)')
+                              'DE population (e.g. runs/iteration_2)')
     parser.add_argument('--optimizer',  choices=['de', 'de+nm'], default='de',
                          help='de = DE only; de+nm = DE + Nelder-Mead polish')
     parser.add_argument('--models',     nargs='+',
@@ -583,22 +604,27 @@ def main():
             parser.error(f"Unknown model '{m}'. Valid: {list(ALL_MODELS)}")
 
     # ── Set module-level config AND env vars (inherited by DE workers) ───────
-    global N_AGENTS, R_WEIGHT, SHAPE_WEIGHT, _EST, _COMP, _DATA_DIR
+    global N_AGENTS, R_WEIGHT, SHAPE_WEIGHT, SCORE_WINDOW, _EST, _COMP, _DATA_DIR
     N_AGENTS     = args.n_agents
     R_WEIGHT     = args.r_weight
     SHAPE_WEIGHT = args.shape_weight
+    SCORE_WINDOW = args.score_window
     _DATA_DIR    = args.data_dir
     os.environ['PTIBL_N_AGENTS']      = str(args.n_agents)
     os.environ['PTIBL_R_WEIGHT']      = str(args.r_weight)
     os.environ['PTIBL_SHAPE_WEIGHT']  = str(args.shape_weight)
+    os.environ['PTIBL_SCORE_WINDOW']  = str(args.score_window)
     os.environ['PTIBL_DATA_DIR']      = args.data_dir
     os.environ['POP_SIZE']            = str(args.pop_size)
 
     _EST, _COMP = _load_dataset(args.data_dir)
+    score_label = (f'window-{args.score_window}' if args.score_window > 0
+                   else 'full-history cumulative')
     print(f"  Loaded estimation set : {len(_EST)} problems")
     print(f"  Loaded competition set: {len(_COMP)} problems")
     print(f"  n_agents={args.n_agents}  pop_size={args.pop_size}  "
-          f"shape_weight={args.shape_weight}  warm_start={args.warm_start}")
+          f"shape_weight={args.shape_weight}  score={score_label}  "
+          f"warm_start={args.warm_start}")
 
     # ── Create run directory (folder name is exactly --run-name) ─────────────
     run_label = args.run_name
@@ -621,6 +647,7 @@ def main():
             'pop_size':     args.pop_size,
             'r_weight':     args.r_weight,
             'shape_weight': args.shape_weight,
+            'score_window': args.score_window,
             'warm_start':   args.warm_start,
             'models':       args.models,
             'n_epochs':  args.n_epochs,

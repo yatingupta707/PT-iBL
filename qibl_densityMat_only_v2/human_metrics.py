@@ -106,10 +106,14 @@ def _load_combined_human_data():
         risk = _series_mean(split_rows, 'risk_series', split_trials)
         reveal = _series_mean(split_rows, 'reveal_series', split_trials)
         alternate = _series_mean(split_rows, 'alt_series', split_trials)
+        div = np.arange(1, split_trials + 1)
         result[split] = {
-            'risk': np.cumsum(risk) / np.arange(1, split_trials + 1),
-            'reveal': np.cumsum(reveal) / np.arange(1, split_trials + 1),
-            'alternate': np.cumsum(alternate) / np.arange(1, split_trials + 1),
+            'risk_inst': risk,
+            'reveal_inst': reveal,
+            'alternate_inst': alternate,
+            'risk': np.cumsum(risk) / div,
+            'reveal': np.cumsum(reveal) / div,
+            'alternate': np.cumsum(alternate) / div,
         }
     result['conditions'] = {}
     for condition in sorted({row['condition'] for row in rows}):
@@ -119,11 +123,24 @@ def _load_combined_human_data():
         )
         risk = _series_mean(condition_rows, 'risk_series', condition_trials)
         alternate = _series_mean(condition_rows, 'alt_series', condition_trials)
+        div = np.arange(1, condition_trials + 1)
         result['conditions'][condition] = {
-            'risk': np.cumsum(risk) / np.arange(1, condition_trials + 1),
-            'alternate': np.cumsum(alternate) / np.arange(1, condition_trials + 1),
+            'risk_inst': risk,
+            'alternate_inst': alternate,
+            'risk': np.cumsum(risk) / div,
+            'alternate': np.cumsum(alternate) / div,
         }
     return result
+
+
+def _inst_from_cum(cum):
+    """Invert a running mean so fallback hardcoded series can still be windowed."""
+    cum = np.asarray(cum, dtype=float)
+    out = np.empty_like(cum)
+    out[0] = cum[0]
+    t = np.arange(1, len(cum), dtype=float)
+    out[1:] = (t + 1.0) * cum[1:] - t * cum[:-1]
+    return out
 
 
 _combined_human = _load_combined_human_data()
@@ -134,9 +151,21 @@ if _combined_human:
     human_r_ts_comp = _combined_human['comp']['risk']
     human_reveal_ts_comp = _combined_human['comp']['reveal']
     human_a_ts_comp = _combined_human['comp']['alternate']
+    human_r_inst_est = _combined_human['est']['risk_inst']
+    human_reveal_inst_est = _combined_human['est']['reveal_inst']
+    human_a_inst_est = _combined_human['est']['alternate_inst']
+    human_r_inst_comp = _combined_human['comp']['risk_inst']
+    human_reveal_inst_comp = _combined_human['comp']['reveal_inst']
+    human_a_inst_comp = _combined_human['comp']['alternate_inst']
 else:
     human_reveal_ts_est = np.zeros_like(human_r_ts_est)
     human_reveal_ts_comp = np.zeros_like(human_r_ts_comp)
+    human_r_inst_est = _inst_from_cum(human_r_ts_est)
+    human_a_inst_est = _inst_from_cum(human_a_ts_est)
+    human_reveal_inst_est = np.zeros_like(human_r_inst_est)
+    human_r_inst_comp = _inst_from_cum(human_r_ts_comp)
+    human_a_inst_comp = _inst_from_cum(human_a_ts_comp)
+    human_reveal_inst_comp = np.zeros_like(human_r_inst_comp)
 
 human_condition_series = (
     _combined_human.get('conditions', {}) if _combined_human else {}
