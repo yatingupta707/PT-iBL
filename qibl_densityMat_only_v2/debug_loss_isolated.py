@@ -10,7 +10,7 @@ Checks:
   3. Loss breakdown on cumulative vs windowed vs instantaneous scoring
 
 USAGE
-  python debug_loss_isolated.py --run-dir runs/iteration_2 --n-agents 15 --n-sims 2
+  python debug_loss_isolated.py --run-dir runs/iteration_3 --n-agents 3 --n-sims 1
 """
 
 import argparse, ast, csv, json, os, sys, time
@@ -196,6 +196,98 @@ def eval_inst(dataset, model_class, params, n_trials, n_agents, n_sims):
     return r_sum / n_sims, a_sum / n_sims, v_sum / n_sims, x_sum / n_sims
 
 
+def analyze_loss_history(model_dir, model_name):
+    path = os.path.join(model_dir, 'loss_history.json')
+    if not os.path.exists(path):
+        print(f'  [{model_name}] no loss_history.json')
+        return None
+    with open(path) as f:
+        hist = json.load(f)
+    gens = hist.get('de_generations') or []
+    if not gens:
+        print(f'  [{model_name}] empty loss history')
+        return None
+    totals = [g['total'] for g in gens]
+    rcs = [g.get('r_corr', float('nan')) for g in gens]
+    unique = sorted(set(round(t, 6) for t in totals))
+    # first gen whose loss is within 2% of the final best
+    final = totals[-1]
+    first_near = None
+    for g, t in zip(gens, totals):
+        if abs(t - final) / max(abs(final), 1e-12) <= 0.02:
+            first_near = g['gen']
+            break
+    note = hist.get('optimizer_note',
+                    'scipy DE is derivative-free; there are no gradients to log.')
+    out = {
+        'n_gens': len(gens),
+        'loss_gen1': totals[0],
+        'loss_final': totals[-1],
+        'drop_pct': 100.0 * (totals[0] - totals[-1]) / max(abs(totals[0]), 1e-12),
+        'r_corr_gen1': rcs[0],
+        'r_corr_final': rcs[-1],
+        'n_unique_bests': len(unique),
+        'first_gen_within_2pct_of_final': first_near,
+        'plateaued': bool(first_near is not None and first_near <= max(10, len(gens) // 3)),
+        'optimizer_note': note,
+    }
+    print(f'  [{model_name}] loss {totals[0]:.5f} -> {totals[-1]:.5f}  '
+          f'({out["drop_pct"]:+.1f}%)  unique_bests={out["n_unique_bests"]}/{len(gens)}')
+    print(f'           R-corr {rcs[0]:+.3f} -> {rcs[-1]:+.3f}  '
+          f'near-final-from-gen={first_near}  '
+          f'{"PLATEAU" if out["plateaued"] else "still moving"}')
+    print(f'           {note}')
+    return out
+
+
+def trace_few_agents(model_class, params, dataset, n_trials, n_agents=3):
+    """Inspect agent-level learning on the first problem with few agents."""
+    row = dataset.iloc[0]
+    risky_values = (float(row['val_high']), float(row['val_low']))
+    risky_probs  = (float(row['p_high']), 1.0 - float(row['p_high']))
+    safe_value   = float(row['val_safe'])
+    agents = []
+    for ai in range(n_agents):
+        model = model_class(params)
+        actions, traces = model.simulate(
+            n_trials, safe_value, risky_values, risky_probs,
+            seed=ai, return_trace=True,
+        )
+        p = np.array([t['p_risky'] for t in traces], dtype=float)
+        r = np.array([t['chose_risky'] for t in traces], dtype=float)
+        v = np.array([t['chose_reveal'] for t in traces], dtype=float)
+        outc = np.array([t['outcome'] for t in traces], dtype=float)
+        val = np.array([t['value'] for t in traces], dtype=float)
+        summary = {
+            'agent': ai,
+            'n_risky': int(r.sum()),
+            'n_reveal': int(v.sum()),
+            'mean_p_risky': round(float(p.mean()), 4),
+            'p_risky_t1': round(float(p[0]), 4),
+            'p_risky_early': round(float(p[:10].mean()), 4),
+            'p_risky_late': round(float(p[-10:].mean()), 4),
+            'mean_outcome': round(float(outc.mean()), 4),
+            'mean_value': round(float(val.mean()), 4),
+            'delta_p_risky': round(float(p[-10:].mean() - p[:10].mean()), 4),
+            'first_8_actions': actions[:8],
+        }
+        agents.append(summary)
+        print(f'    agent {ai}: pR {summary["p_risky_early"]:.3f}->'
+              f'{summary["p_risky_late"]:.3f} (d={summary["delta_p_risky"]:+.3f})  '
+              f'risky={summary["n_risky"]} reveal={summary["n_reveal"]}  '
+              f'mean_outcome={summary["mean_outcome"]:.3f}  '
+              f'first8={summary["first_8_actions"]}')
+    return {
+        'problem': {
+            'val_high': float(row['val_high']),
+            'p_high': float(row['p_high']),
+            'val_low': float(row['val_low']),
+            'val_safe': float(row['val_safe']),
+        },
+        'agents': agents,
+    }
+
+
 def fmt_blocks(blocks):
     return '  '.join(f'{k}={v:.3f}' for k, v in blocks.items())
 
@@ -216,15 +308,18 @@ def score_pair(model_ts, human_ts, label):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run-dir', default='runs/iteration_2')
+    parser.add_argument('--run-dir', default='runs/iteration_3')
     parser.add_argument('--data-dir', default='data')
     parser.add_argument('--human-csv', default=None)
-    parser.add_argument('--n-agents', type=int, default=15)
-    parser.add_argument('--n-sims', type=int, default=2)
+    parser.add_argument('--n-agents', type=int, default=3,
+                        help='Keep small so agent learning is inspectable (default 3)')
+    parser.add_argument('--n-sims', type=int, default=1)
     parser.add_argument('--window', type=int, default=5)
     parser.add_argument('--models', nargs='*', default=None)
-    parser.add_argument('--shape-weight', type=float, default=0.002)
+    parser.add_argument('--shape-weight', type=float, default=None)
     parser.add_argument('--r-weight', type=float, default=0.5)
+    parser.add_argument('--trace-agents', type=int, default=3,
+                        help='How many agents to dump trial-level traces for')
     args = parser.parse_args()
 
     human_csv = args.human_csv or os.path.join(_HERE, '..', 'tdcs_load_60_final_comb.csv')
@@ -237,6 +332,18 @@ def main():
     print(f'Human CSV   : {human_csv}')
     print(f'N_TRIALS    : {n_trials}   est problems: {len(est)}')
     print(f'MC budget   : n_agents={args.n_agents}  n_sims={args.n_sims}')
+    ckpt_path = os.path.join(args.run_dir, 'checkpoint.json')
+    if args.shape_weight is None:
+        args.shape_weight = 0.1
+        if os.path.exists(ckpt_path):
+            with open(ckpt_path) as f:
+                ckpt = json.load(f)
+            args.shape_weight = float(ckpt.get('shape_weight', 0.1))
+            args.r_weight = float(ckpt.get('r_weight', args.r_weight))
+            print(f'From checkpoint: shape_weight={args.shape_weight}  '
+                  f'r_weight={args.r_weight}  '
+                  f'score_window={ckpt.get("score_window")}')
+    print('Optimizer   : Differential Evolution (no gradients exist)')
     print()
 
     # ── Human instantaneous shape (the target) ──────────────────────────────
@@ -292,6 +399,12 @@ def main():
         print(f'  {model_name}   p_reveal={p_reveal:.4f}   '
               f'({"SIZEABLE - reveal understates R-rate" if p_reveal >= 0.05 else "negligible"})')
         print('=' * 78)
+
+        loss_info = analyze_loss_history(os.path.join(args.run_dir, model_name), model_name)
+        print('  Agent-level learning (first problem, few agents):')
+        traces = trace_few_agents(
+            ALL_MODELS[model_name], params, est, n_trials, n_agents=args.trace_agents
+        )
 
         t0 = time.time()
         r_inst, a_inst, v_inst, x_inst = eval_inst(
@@ -376,6 +489,8 @@ def main():
             'a_corr_win': scores['win_a']['corr'],
             'blocks': blocks,
             'turns': [{'trial': t, 'kind': k, 'value': v} for t, k, v in turns],
+            'loss_history': loss_info,
+            'agent_traces': traces,
         }
         all_rows.append(row)
         print()

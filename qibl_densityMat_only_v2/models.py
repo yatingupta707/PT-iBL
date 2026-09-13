@@ -208,22 +208,30 @@ class ModelBase:
                   safe_value:   float,
                   risky_values: Tuple,
                   risky_probs:  Tuple,
-                  seed: int = 0) -> List[str]:
+                  seed: int = 0,
+                  return_trace: bool = False):
         """
         Forward simulate n_trials. Returns list of action strings.
         Uses stochastic memory retrieval (sigma_s active).
 
         Memory noise and choice/outcome noise are independent streams
         derived from `seed`, so each agent (distinct seed) is independent.
+
+        If return_trace=True, also returns a list of per-trial dicts
+        (p_risky, blended values, outcome, stored value, phase).
+        Differential Evolution has no gradients; this trace is how we
+        inspect agent-level learning.
         """
         ss = np.random.SeedSequence(int(seed))
         mem_ss, choice_ss = ss.spawn(2)
         self.reset(seed=int(mem_ss.generate_state(1)[0]))
         rng     = np.random.default_rng(choice_ss)
         actions = []
+        traces  = []
         for t in range(n_trials):
             mu = self._memory.retrieve(self.options, t, deterministic=False)
             _, p_risky = self._compute_probs(t, mu)
+            p_risky = float(p_risky)
 
             p_reveal = float(np.clip(self.params.get('p_reveal', 0.0), 0.0, 1.0))
             if p_reveal > 0.0 and rng.random() < p_reveal:
@@ -240,10 +248,27 @@ class ModelBase:
                 outcome = float(safe_value)
 
             value = self._get_value(outcome)
+            phase_before = float(self._phase)
             update_action = 'risky' if action == 'reveal' else action
             self._update_state(t, update_action, outcome, value, mu, p_risky)
             self._last_action = action
+            if return_trace:
+                traces.append({
+                    't':            t,
+                    'action':       action,
+                    'p_risky':      p_risky,
+                    'mu_safe':      float(mu.get('safe', 0.0)),
+                    'mu_risky':     float(mu.get('risky', 0.0)),
+                    'outcome':      outcome,
+                    'value':        float(value),
+                    'phase_before': phase_before,
+                    'phase_after':  float(self._phase),
+                    'chose_risky':  1.0 if action == 'risky' else 0.0,
+                    'chose_reveal': 1.0 if action == 'reveal' else 0.0,
+                })
 
+        if return_trace:
+            return actions, traces
         return actions
 
     @classmethod

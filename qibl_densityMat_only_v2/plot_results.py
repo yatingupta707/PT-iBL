@@ -30,6 +30,8 @@ if _HERE not in sys.path:
 from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp,
+    human_r_inst_est, human_a_inst_est,
+    human_r_inst_comp, human_a_inst_comp,
     human_condition_series,
 )
 
@@ -48,13 +50,25 @@ def _colour(name: str, idx: int) -> str:
     return MODEL_COLOURS.get(name, DEFAULT_COLOURS[idx % len(DEFAULT_COLOURS)])
 
 
-# ── Single figure: 1 row × 2 cols (R-rate | A-rate) ──────────────────────────
+def windowed_mean(x, window=5):
+    x = np.asarray(x, dtype=float)
+    out = np.empty_like(x)
+    for t in range(len(x)):
+        lo = max(0, t - window + 1)
+        out[t] = x[lo:t + 1].mean()
+    return out
+
+
+def _ylabel(metric, rate):
+    prefix = {'cum': 'Cumulative', 'win': 'Windowed', 'inst': 'Instantaneous'}[rate]
+    return f'{prefix} {metric}'
 
 def _make_figure(title: str,
                   human_r: np.ndarray, human_a: np.ndarray,
                   models: list,              # list of (name, r_ts, a_ts, reveal_ts)
                   output_path: str,
-                  show: bool = True) -> None:
+                  show: bool = True,
+                  rate: str = 'cum') -> None:
     N      = len(human_r)
     trials = np.arange(1, N + 1)
 
@@ -62,8 +76,8 @@ def _make_figure(title: str,
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
 
     for ax, human_ts, ylabel, metric in [
-        (axes[0], human_r, 'Cumulative R-rate', 'R-rate'),
-        (axes[1], human_a, 'Cumulative A-rate', 'A-rate'),
+        (axes[0], human_r, _ylabel('R-rate', rate), 'R-rate'),
+        (axes[1], human_a, _ylabel('A-rate', rate), 'A-rate'),
     ]:
         ax.plot(trials, human_ts, color='black', lw=2.2,
                  linestyle='-', label='Human', zorder=10)
@@ -99,13 +113,18 @@ def _make_figure(title: str,
 
 # ── Load model time series ────────────────────────────────────────────────────
 
-def _load_model_ts(model_dir: str, split: str):
+def _load_model_ts(model_dir: str, split: str, rate: str = 'cum'):
     """
     Load npy time series for one model and one set split.
+    rate: 'cum' (default plot files), 'win', or 'inst'.
     Returns (r_ts, a_ts, reveal_ts) or (None, None, None) if files are missing.
     """
-    r_path = os.path.join(model_dir, f'eval_{split}_r_ts.npy')
-    a_path = os.path.join(model_dir, f'eval_{split}_a_ts.npy')
+    if rate == 'cum':
+        r_path = os.path.join(model_dir, f'eval_{split}_r_ts.npy')
+        a_path = os.path.join(model_dir, f'eval_{split}_a_ts.npy')
+    else:
+        r_path = os.path.join(model_dir, f'eval_{split}_r_{rate}.npy')
+        a_path = os.path.join(model_dir, f'eval_{split}_a_{rate}.npy')
     reveal_path = os.path.join(model_dir, f'eval_{split}_reveal_ts.npy')
     if not (os.path.exists(r_path) and os.path.exists(a_path)):
         return None, None, None
@@ -127,6 +146,11 @@ def main():
                          help='Models to include (default: all found)')
     parser.add_argument('--no-show',    action='store_true',
                          help='Save plots without displaying them')
+    parser.add_argument('--rate', choices=['cum', 'win', 'inst'], default='cum',
+                         help='Which rate to plot. cum = published cumulative plots '
+                              '(default). win/inst need evaluate.py inst/win npy files.')
+    parser.add_argument('--window', type=int, default=5,
+                         help='Window length when --rate win is applied to human series')
     args = parser.parse_args()
 
     if not os.path.isdir(args.run_dir):
@@ -158,9 +182,9 @@ def main():
         entries = []
         for name in model_names:
             model_dir = os.path.join(args.run_dir, name)
-            r_ts, a_ts, reveal_ts = _load_model_ts(model_dir, split)
+            r_ts, a_ts, reveal_ts = _load_model_ts(model_dir, split, rate=args.rate)
             if r_ts is None:
-                print(f"  [{name}] No eval_{split}_*.npy — skipped")
+                print(f"  [{name}] No eval_{split}_*{args.rate} npy — skipped")
             else:
                 entries.append((name, r_ts, a_ts, reveal_ts))
         return entries
@@ -170,29 +194,55 @@ def main():
 
     run_label = os.path.basename(args.run_dir)
     show      = not args.no_show
+    suffix    = '' if args.rate == 'cum' else f'_{args.rate}'
+    rate_tag  = {'cum': 'cumulative', 'win': 'windowed', 'inst': 'instantaneous'}[args.rate]
+
+    def _human_pair(split):
+        if args.rate == 'cum':
+            if split == 'train':
+                return human_r_ts_est, human_a_ts_est
+            return human_r_ts_comp, human_a_ts_comp
+        r = human_r_inst_est if split == 'train' else human_r_inst_comp
+        a = human_a_inst_est if split == 'train' else human_a_inst_comp
+        if args.rate == 'win':
+            return windowed_mean(r, args.window), windowed_mean(a, args.window)
+        return r, a
+
+    def _human_condition(series):
+        if args.rate == 'cum':
+            return series['risk'], series['alternate']
+        r = series.get('risk_inst', series['risk'])
+        a = series.get('alternate_inst', series['alternate'])
+        if args.rate == 'win':
+            return windowed_mean(r, args.window), windowed_mean(a, args.window)
+        return r, a
 
     # ── Estimation set plot ───────────────────────────────────────────────────
     if train_models:
+        hr, ha = _human_pair('train')
         _make_figure(
-            title       = f'Estimation set (training)  —  {run_label}',
-            human_r     = human_r_ts_est,
-            human_a     = human_a_ts_est,
+            title       = f'Estimation set (training)  —  {run_label} [{rate_tag}]',
+            human_r     = hr,
+            human_a     = ha,
             models      = train_models,
-            output_path = os.path.join(output_dir, 'plot_estimation_set.png'),
+            output_path = os.path.join(output_dir, f'plot_estimation_set{suffix}.png'),
             show        = show,
+            rate        = args.rate,
         )
     else:
         print("  No training-set time series available — skipping est plot.")
 
     # ── Competition set plot ──────────────────────────────────────────────────
     if test_models:
+        hr, ha = _human_pair('test')
         _make_figure(
-            title       = f'Competition set (test)  —  {run_label}',
-            human_r     = human_r_ts_comp,
-            human_a     = human_a_ts_comp,
+            title       = f'Competition set (test)  —  {run_label} [{rate_tag}]',
+            human_r     = hr,
+            human_a     = ha,
             models      = test_models,
-            output_path = os.path.join(output_dir, 'plot_competition_set.png'),
+            output_path = os.path.join(output_dir, f'plot_competition_set{suffix}.png'),
             show        = show,
+            rate        = args.rate,
         )
     else:
         print("  No test-set time series available — skipping comp plot.")
@@ -203,13 +253,15 @@ def main():
         condition_models = train_models if split == 'train' else test_models
         if not condition_models:
             continue
+        hr, ha = _human_condition(human_series)
         _make_figure(
-            title       = f'{condition}  —  {run_label}',
-            human_r     = human_series['risk'],
-            human_a     = human_series['alternate'],
+            title       = f'{condition}  —  {run_label} [{rate_tag}]',
+            human_r     = hr,
+            human_a     = ha,
             models      = condition_models,
-            output_path = os.path.join(output_dir, f'plot_{condition}.png'),
+            output_path = os.path.join(output_dir, f'plot_{condition}{suffix}.png'),
             show        = show,
+            rate        = args.rate,
         )
 
     print(f"\n  Plots saved to: {output_dir}")
