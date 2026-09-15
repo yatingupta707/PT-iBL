@@ -32,7 +32,7 @@ from human_metrics import (
     human_r_ts_comp, human_a_ts_comp,
     human_r_inst_est, human_a_inst_est,
     human_r_inst_comp, human_a_inst_comp,
-    human_condition_series,
+    human_condition_series, CONDITION_NAMES,
 )
 
 # ── Colour palette (one per model) ────────────────────────────────────────────
@@ -160,38 +160,6 @@ def main():
     output_dir = args.output_dir or args.run_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # Auto-detect model subdirectories
-    if args.models:
-        model_names = args.models
-    else:
-        model_names = [
-            d for d in sorted(os.listdir(args.run_dir))
-            if os.path.isdir(os.path.join(args.run_dir, d))
-            and os.path.exists(os.path.join(args.run_dir, d, 'best_params.json'))
-        ]
-
-    if not model_names:
-        print("No evaluated models found. Run evaluate.py first.")
-        sys.exit(1)
-
-    print(f"  Models found: {model_names}")
-
-    # ── Load time series for both splits ─────────────────────────────────────
-    def load_split(split: str) -> list:
-        """Returns list of (model_name, r_ts, a_ts, reveal_ts)."""
-        entries = []
-        for name in model_names:
-            model_dir = os.path.join(args.run_dir, name)
-            r_ts, a_ts, reveal_ts = _load_model_ts(model_dir, split, rate=args.rate)
-            if r_ts is None:
-                print(f"  [{name}] No eval_{split}_*{args.rate} npy — skipped")
-            else:
-                entries.append((name, r_ts, a_ts, reveal_ts))
-        return entries
-
-    train_models = load_split('train')
-    test_models  = load_split('test')
-
     run_label = os.path.basename(args.run_dir)
     show      = not args.no_show
     suffix    = '' if args.rate == 'cum' else f'_{args.rate}'
@@ -217,11 +185,89 @@ def main():
             return windowed_mean(r, args.window), windowed_mean(a, args.window)
         return r, a
 
-    # ── Estimation set plot ───────────────────────────────────────────────────
+    def _models_in(base_dir, names):
+        entries = []
+        for name in names:
+            r_ts, a_ts, reveal_ts = _load_model_ts(os.path.join(base_dir, name),
+                                                   'train', rate=args.rate)
+            if r_ts is None:
+                # load_1 pooled plots historically used eval_test_*; keep fallback
+                r_ts, a_ts, reveal_ts = _load_model_ts(
+                    os.path.join(base_dir, name), 'test', rate=args.rate)
+            if r_ts is None:
+                print(f"  [{os.path.basename(base_dir)}/{name}] no eval npy -- skipped")
+            else:
+                entries.append((name, r_ts, a_ts, reveal_ts))
+        return entries
+
+    condition_runs = []
+    for cond in CONDITION_NAMES:
+        cond_dir = os.path.join(args.run_dir, cond)
+        if not os.path.isdir(cond_dir):
+            continue
+        names = args.models or [
+            d for d in sorted(os.listdir(cond_dir))
+            if os.path.exists(os.path.join(cond_dir, d, 'best_params.json'))
+        ]
+        if names:
+            condition_runs.append((cond, cond_dir, names))
+
+    if args.models:
+        top_names = args.models
+    else:
+        top_names = [
+            d for d in sorted(os.listdir(args.run_dir))
+            if os.path.isdir(os.path.join(args.run_dir, d))
+            and os.path.exists(os.path.join(args.run_dir, d, 'best_params.json'))
+        ]
+
+    if not condition_runs and not top_names:
+        print("No evaluated models found. Run evaluate.py first.")
+        sys.exit(1)
+
+    # Per-condition fits: each plot_tDCS_* uses that condition's own models.
+    if condition_runs:
+        print(f"  Condition fits: {[c for c, _, _ in condition_runs]}")
+        for cond, cond_dir, names in condition_runs:
+            if cond not in human_condition_series:
+                continue
+            models = _models_in(cond_dir, names)
+            if not models:
+                continue
+            hr, ha = _human_condition(human_condition_series[cond])
+            _make_figure(
+                title       = f'{cond}  --  {run_label} [{rate_tag}]',
+                human_r     = hr,
+                human_a     = ha,
+                models      = models,
+                output_path = os.path.join(output_dir, f'plot_{cond}{suffix}.png'),
+                show        = show,
+                rate        = args.rate,
+            )
+        print(f"\n  Plots saved to: {output_dir}")
+        print('  Judge each plot_tDCS_* against humans from that same condition.')
+        return
+
+    print(f"  Models found: {top_names}")
+
+    def load_split(split: str) -> list:
+        entries = []
+        for name in top_names:
+            model_dir = os.path.join(args.run_dir, name)
+            r_ts, a_ts, reveal_ts = _load_model_ts(model_dir, split, rate=args.rate)
+            if r_ts is None:
+                print(f"  [{name}] No eval_{split}_*{args.rate} npy -- skipped")
+            else:
+                entries.append((name, r_ts, a_ts, reveal_ts))
+        return entries
+
+    train_models = load_split('train')
+    test_models  = load_split('test')
+
     if train_models:
         hr, ha = _human_pair('train')
         _make_figure(
-            title       = f'Estimation set (training)  —  {run_label} [{rate_tag}]',
+            title       = f'Estimation set (training)  --  {run_label} [{rate_tag}]',
             human_r     = hr,
             human_a     = ha,
             models      = train_models,
@@ -230,13 +276,12 @@ def main():
             rate        = args.rate,
         )
     else:
-        print("  No training-set time series available — skipping est plot.")
+        print("  No training-set time series available -- skipping est plot.")
 
-    # ── Competition set plot ──────────────────────────────────────────────────
     if test_models:
         hr, ha = _human_pair('test')
         _make_figure(
-            title       = f'Competition set (test)  —  {run_label} [{rate_tag}]',
+            title       = f'Competition set (test)  --  {run_label} [{rate_tag}]',
             human_r     = hr,
             human_a     = ha,
             models      = test_models,
@@ -245,16 +290,11 @@ def main():
             rate        = args.rate,
         )
     else:
-        print("  No test-set time series available — skipping comp plot.")
+        print("  No test-set time series available -- skipping comp plot.")
 
-    # Produce one two-panel figure for each exact tDCS/load condition.
-    # These overlay models trained on pooled load_0 / load_1. They are not
-    # a fair judgement of a pooled fit; use plot_estimation_set.png for that.
     if human_condition_series:
         print('  Note: plot_tDCS_* overlays pooled-fit models on condition-specific')
-        print('  humans. Judge pooled training on plot_estimation_set.png /')
-        print('  plot_competition_set.png. Fit --fit-condition tDCS_0_load_0 if')
-        print('  the tDCS_0 figures are the deliverable.')
+        print('  humans. For matched overlays train with --fit-all-conditions.')
     for condition, human_series in sorted(human_condition_series.items()):
         split = 'train' if condition.endswith('load_0') else 'test'
         condition_models = train_models if split == 'train' else test_models
@@ -262,7 +302,7 @@ def main():
             continue
         hr, ha = _human_condition(human_series)
         _make_figure(
-            title       = f'{condition}  —  {run_label} [{rate_tag}]',
+            title       = f'{condition}  --  {run_label} [{rate_tag}]',
             human_r     = hr,
             human_a     = ha,
             models      = condition_models,

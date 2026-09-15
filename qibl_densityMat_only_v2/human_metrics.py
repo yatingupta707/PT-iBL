@@ -173,3 +173,25 @@ else:
 human_condition_series = (
     _combined_human.get('conditions', {}) if _combined_human else {}
 )
+
+CONDITION_NAMES = [
+    'tDCS_0_load_0',
+    'tDCS_1_load_0',
+    'tDCS_0_load_1',
+    'tDCS_1_load_1',
+]
+
+
+def condition_problem_split(condition):
+    """load_0 is scored on the estimation problems; load_1 on competition."""
+    if not condition:
+        return 'est'
+    return 'est' if str(condition).endswith('load_0') else 'comp'
+
+
+def condition_n_trials(condition):
+    if not condition:
+        return int(len(human_r_ts_est))
+    if condition not in human_condition_series:
+        raise KeyError(condition)
+    return int(len(human_condition_series[condition]['risk']))

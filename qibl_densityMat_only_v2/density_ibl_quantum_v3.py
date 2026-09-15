@@ -69,7 +69,8 @@ from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp, human_reveal_ts_est,
     human_r_inst_est, human_a_inst_est, human_reveal_inst_est,
-    human_condition_series,
+    human_condition_series, CONDITION_NAMES,
+    condition_problem_split, condition_n_trials,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -77,7 +78,7 @@ from human_metrics import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 COLS      = ['id', 'val_high', 'p_high', 'val_low', 'val_safe', 'sure', 'd1', 'mode']
-N_TRIALS  = len(human_r_ts_est)
+N_TRIALS  = int(os.environ.get('PTIBL_N_TRIALS', str(len(human_r_ts_est))))
 N_AGENTS  = int(os.environ.get('PTIBL_N_AGENTS', '5'))
 R_WEIGHT  = float(os.environ.get('PTIBL_R_WEIGHT', '0.5'))
 SHAPE_WEIGHT = float(os.environ.get('PTIBL_SHAPE_WEIGHT', '0.1'))
@@ -87,6 +88,7 @@ DEBUG_MODE = os.environ.get('PTIBL_DEBUG', '0') == '1'
 FREEZE_P_REVEAL = os.environ.get('PTIBL_FREEZE_P_REVEAL', '1') == '1'
 FREEZE_THETA = os.environ.get('PTIBL_FREEZE_THETA', '0') == '1'
 FIT_CONDITION = os.environ.get('PTIBL_FIT_CONDITION', '').strip()
+FIT_SPLIT = os.environ.get('PTIBL_FIT_SPLIT', 'est').strip() or 'est'
 _DATA_DIR = os.environ.get('PTIBL_DATA_DIR', 'data')
 
 
@@ -102,6 +104,32 @@ try:
     _EST, _COMP = _load_dataset(_DATA_DIR)
 except Exception:
     _EST = _COMP = None
+
+
+def _fit_dataset():
+    """Problem set the objective simulates on (est for load_0, comp for load_1)."""
+    split = FIT_SPLIT or os.environ.get('PTIBL_FIT_SPLIT', 'est')
+    data = _COMP if split == 'comp' else _EST
+    if data is None:
+        raise RuntimeError("Dataset not loaded. Check data directory.")
+    return data
+
+
+def _apply_fit_target(condition):
+    """Point scoring + simulation at pooled load_0 or one tDCS/load slice."""
+    global N_TRIALS, FIT_CONDITION, FIT_SPLIT
+    condition = (condition or '').strip()
+    FIT_CONDITION = condition
+    if condition:
+        FIT_SPLIT = condition_problem_split(condition)
+        N_TRIALS = condition_n_trials(condition)
+    else:
+        FIT_SPLIT = 'est'
+        N_TRIALS = int(len(human_r_ts_est))
+    os.environ['PTIBL_FIT_CONDITION'] = FIT_CONDITION
+    os.environ['PTIBL_FIT_SPLIT'] = FIT_SPLIT
+    os.environ['PTIBL_N_TRIALS'] = str(N_TRIALS)
+    return FIT_SPLIT, N_TRIALS
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -400,22 +428,24 @@ def _init_population(model_class, popsize: int, warm_x, rng: np.random.Generator
     return init
 
 
-def _load_warm_params(warm_dir, model_name):
+def _load_warm_params(warm_dir, model_name, condition=None):
     if not warm_dir:
         return None
-    path = os.path.join(warm_dir, model_name, 'best_params.json')
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f).get('params')
+    candidates = []
+    if condition:
+        candidates.append(os.path.join(warm_dir, condition, model_name, 'best_params.json'))
+    candidates.append(os.path.join(warm_dir, model_name, 'best_params.json'))
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f).get('params')
+    return None
 
 
 def _obj(x: np.ndarray, model_class) -> float:
     """Windowed MSD/shape + optional cumulative-slope objective."""
-    if _EST is None:
-        raise RuntimeError("Dataset not loaded. Check data directory.")
     params = _build_params(model_class, x)
-    bundle = eval_bundle(_EST, model_class, params, N_AGENTS)
+    bundle = eval_bundle(_fit_dataset(), model_class, params, N_AGENTS)
     return _score_bundle(bundle)['total']
 
 
@@ -435,8 +465,8 @@ _OBJ_FN = {
 
 
 def _dump_debug_trace(model_dir, model_class, params, gen):
-    """Write a 3-agent trial-by-trial trace on the first estimation problem."""
-    row = _EST.iloc[0]
+    """Write a 3-agent trial-by-trial trace on the first fitted problem."""
+    row = _fit_dataset().iloc[0]
     risky_values = (float(row['val_high']), float(row['val_low']))
     risky_probs  = (float(row['p_high']), 1.0 - float(row['p_high']))
     safe_value   = float(row['val_safe'])
@@ -500,7 +530,7 @@ def train_model(model_name: str, model_dir: str,
     def callback(xk, convergence=None):
         _gen[0] += 1
         params = _build_params(model_class, xk)
-        bundle = eval_bundle(_EST, model_class, params, N_AGENTS)
+        bundle = eval_bundle(_fit_dataset(), model_class, params, N_AGENTS)
         sc = _score_bundle(bundle)
 
         step = None
@@ -541,7 +571,7 @@ def train_model(model_name: str, model_dir: str,
               f"r_corr_win={sc['corr_r']:+.3f}  r_corr_cum={sc['corr_r_cum']:+.3f}  "
               f"earlyR={sc['early_r']:.3f} lateR={sc['late_r']:.3f}")
 
-        if DEBUG_MODE and _EST is not None and _gen[0] <= 3:
+        if DEBUG_MODE and _gen[0] <= 3:
             _dump_debug_trace(model_dir, model_class, params, _gen[0])
         return False
 
@@ -564,7 +594,7 @@ def train_model(model_name: str, model_dir: str,
         polish   = False,
     )
 
-    warm_params = _load_warm_params(warm_dir, model_name)
+    warm_params = _load_warm_params(warm_dir, model_name, condition=FIT_CONDITION or None)
     if warm_params is not None:
         warm_x = _params_to_x(model_class, warm_params)
         rng_init = np.random.default_rng(42)
@@ -595,7 +625,7 @@ def train_model(model_name: str, model_dir: str,
             best_loss = float(res_nm.fun)
 
         params_nm = _build_params(model_class, res_nm.x)
-        bundle_nm = eval_bundle(_EST, model_class, params_nm, N_AGENTS)
+        bundle_nm = eval_bundle(_fit_dataset(), model_class, params_nm, N_AGENTS)
         sc_nm = _score_bundle(bundle_nm)
         loss_history['nm_polish'] = {
             'total':      round(float(res_nm.fun), 6),
@@ -617,7 +647,7 @@ def train_model(model_name: str, model_dir: str,
 
     # ── Final evaluation ─────────────────────────────────────────────────────
     best_params = _build_params(model_class, best_x)
-    bundle_final = eval_bundle(_EST, model_class, best_params, N_AGENTS)
+    bundle_final = eval_bundle(_fit_dataset(), model_class, best_params, N_AGENTS)
     sc_final = _score_bundle(bundle_final)
 
     result = {
@@ -632,6 +662,8 @@ def train_model(model_name: str, model_dir: str,
         'freeze_p_reveal':  FREEZE_P_REVEAL,
         'freeze_theta':     FREEZE_THETA,
         'fit_condition':    FIT_CONDITION or None,
+        'fit_split':        FIT_SPLIT,
+        'n_trials':         N_TRIALS,
         'warm_start':       warm_dir,
         'train_total_loss': round(best_loss, 6),
         'train_total_msd':  round(sc_final['msd_term'], 6),
@@ -720,7 +752,7 @@ Use `--fit-condition` only if tDCS_0 figures are the deliverable.
 | problem seeds     | shared 0    | unique (evaluate.py) |
 | freeze_p_reveal   | no          | {getattr(args, 'freeze_p_reveal', True)} |
 | freeze_theta      | no          | {getattr(args, 'freeze_theta', False)} |
-| fit_condition     | pooled load_0 | {getattr(args, 'fit_condition', None) or 'pooled load_0'} |
+| fit_condition     | pooled load_0 | {getattr(args, 'fit_condition', None) or ('ALL 4 conditions' if getattr(args, 'fit_all_conditions', False) else 'pooled load_0')} |
 | score_window      | 5           | {args.score_window} |
 | shape_weight      | 0.1         | {args.shape_weight} |
 | cum_shape_weight  | 0.15        | {args.cum_shape_weight} |
@@ -804,6 +836,9 @@ def main():
     parser.add_argument('--fit-condition', default='',
                          help='Human target condition (e.g. tDCS_0_load_0). '
                               'Default empty = pooled load_0 estimation set.')
+    parser.add_argument('--fit-all-conditions', action='store_true',
+                         help='Train a separate parameter vector for each tDCS/load '
+                              'condition so plot_tDCS_* overlays are real fits.')
     parser.add_argument('--optimizer',  choices=['de', 'de+nm'], default='de',
                          help='de = DE only; de+nm = DE + Nelder-Mead polish')
     parser.add_argument('--models',     nargs='+',
@@ -834,16 +869,31 @@ def main():
     if args.warm_start and str(args.warm_start).lower() in ('none', 'off', '-', ''):
         args.warm_start = None
 
+    if args.fit_all_conditions and args.fit_condition:
+        parser.error('Use either --fit-all-conditions or --fit-condition, not both.')
+
     if args.fit_condition and args.fit_condition not in human_condition_series:
         parser.error(
             f"Unknown --fit-condition {args.fit_condition!r}. "
             f"Valid: {sorted(human_condition_series)}"
         )
 
+    if args.fit_all_conditions:
+        missing = [c for c in CONDITION_NAMES if c not in human_condition_series]
+        if missing:
+            parser.error(f'Missing human series for {missing}')
+        targets = list(CONDITION_NAMES)
+        if args.run_name == 'iteration_5':
+            args.run_name = 'iteration_5_conditions'
+    elif args.fit_condition:
+        targets = [args.fit_condition]
+    else:
+        targets = [None]
+
     # ── Set module-level config AND env vars (inherited by DE workers) ───────
     global N_AGENTS, R_WEIGHT, SHAPE_WEIGHT, SCORE_WINDOW, CUM_SHAPE_WEIGHT
-    global DEBUG_MODE, FREEZE_P_REVEAL, FREEZE_THETA, FIT_CONDITION
-    global _EST, _COMP, _DATA_DIR
+    global DEBUG_MODE, FREEZE_P_REVEAL, FREEZE_THETA, FIT_CONDITION, FIT_SPLIT
+    global N_TRIALS, _EST, _COMP, _DATA_DIR
     N_AGENTS     = args.n_agents
     R_WEIGHT     = args.r_weight
     SHAPE_WEIGHT = args.shape_weight
@@ -852,7 +902,6 @@ def main():
     DEBUG_MODE   = bool(args.debug)
     FREEZE_P_REVEAL = bool(args.freeze_p_reveal)
     FREEZE_THETA = bool(args.freeze_theta)
-    FIT_CONDITION = (args.fit_condition or '').strip()
     _DATA_DIR    = args.data_dir
     os.environ['PTIBL_N_AGENTS']      = str(args.n_agents)
     os.environ['PTIBL_R_WEIGHT']      = str(args.r_weight)
@@ -862,7 +911,6 @@ def main():
     os.environ['PTIBL_DEBUG']         = '1' if args.debug else '0'
     os.environ['PTIBL_FREEZE_P_REVEAL'] = '1' if args.freeze_p_reveal else '0'
     os.environ['PTIBL_FREEZE_THETA']  = '1' if args.freeze_theta else '0'
-    os.environ['PTIBL_FIT_CONDITION'] = FIT_CONDITION
     os.environ['PTIBL_DATA_DIR']      = args.data_dir
     os.environ['POP_SIZE']            = str(args.pop_size)
 
@@ -874,8 +922,8 @@ def main():
     print(f"  n_agents={args.n_agents}  pop_size={args.pop_size}  "
           f"shape_weight={args.shape_weight}  cum_shape_weight={args.cum_shape_weight}  "
           f"score={score_label}  warm_start={args.warm_start}")
-    print(f"  freeze_p_reveal={args.freeze_p_reveal}  freeze_theta={args.freeze_theta}  "
-          f"fit_condition={FIT_CONDITION or 'pooled load_0'}")
+    print(f"  freeze_p_reveal={args.freeze_p_reveal}  freeze_theta={args.freeze_theta}")
+    print(f"  fit targets: {targets if targets != [None] else ['pooled load_0']}")
 
     # ── Create run directory (folder name is exactly --run-name) ─────────────
     run_label = args.run_name
@@ -903,61 +951,71 @@ def main():
             'freeze_p_reveal': args.freeze_p_reveal,
             'freeze_theta': args.freeze_theta,
             'fit_condition': args.fit_condition or None,
+            'fit_all_conditions': bool(args.fit_all_conditions),
+            'fit_targets': [t or 'pooled_load_0' for t in targets],
             'warm_start':   args.warm_start,
             'models':       args.models,
-            'n_epochs':  args.n_epochs,
             'started_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
         })
         _save_checkpoint(ckpt_path, ckpt)
 
     if completed:
-        print(f"  Resuming: already completed → {sorted(completed)}")
+        print(f"  Resuming: already completed -> {sorted(completed)}")
 
-    # ── Train each model ─────────────────────────────────────────────────────
+    # ── Train each target x model ────────────────────────────────────────────
     all_results = {}
-    for model_name in args.models:
-        if model_name in completed:
-            print(f"\n  Skipping {model_name} (checkpoint: already done)")
-            # Load existing result for summary
-            bp = os.path.join(run_dir, model_name, 'best_params.json')
-            if os.path.exists(bp):
-                with open(bp) as f:
-                    all_results[model_name] = json.load(f)
-            continue
+    for target in targets:
+        split, n_trials = _apply_fit_target(target)
+        target_label = target or 'pooled_load_0'
+        print(f"\n  --- Target {target_label}  split={split}  n_trials={n_trials} ---")
+        for model_name in args.models:
+            ckpt_key = f'{target}/{model_name}' if target else model_name
+            model_dir = (os.path.join(run_dir, target, model_name) if target
+                         else os.path.join(run_dir, model_name))
+            result_key = ckpt_key
+            if ckpt_key in completed:
+                print(f"\n  Skipping {ckpt_key} (checkpoint: already done)")
+                bp = os.path.join(model_dir, 'best_params.json')
+                if os.path.exists(bp):
+                    with open(bp) as f:
+                        all_results[result_key] = json.load(f)
+                continue
 
-        model_dir = os.path.join(run_dir, model_name)
-        result    = train_model(
-            model_name   = model_name,
-            model_dir    = model_dir,
-            n_epochs     = args.n_epochs,
-            optimizer    = args.optimizer,
-            use_parallel = not args.no_parallel,
-            warm_dir     = args.warm_start,
-        )
-        all_results[model_name] = result
+            result    = train_model(
+                model_name   = model_name,
+                model_dir    = model_dir,
+                n_epochs     = args.n_epochs,
+                optimizer    = args.optimizer,
+                use_parallel = not args.no_parallel,
+                warm_dir     = args.warm_start,
+            )
+            all_results[result_key] = result
 
-        # Update checkpoint atomically after each successful model
-        ckpt['completed_models'].append(model_name)
-        ckpt[f'{model_name}_completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
-        _save_checkpoint(ckpt_path, ckpt)
-        print(f"  Checkpoint updated: {model_name} saved")
+            ckpt['completed_models'].append(ckpt_key)
+            ckpt[f'{ckpt_key}_completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+            _save_checkpoint(ckpt_path, ckpt)
+            print(f"  Checkpoint updated: {ckpt_key} saved")
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print(f"\n{'='*65}")
     print(f"  TRAINING COMPLETE -- {run_label}")
     print(f"{'-'*65}")
-    print(f"  {'Model':<16}  {'loss':>10}  {'R-MSD':>8}  {'R-win':>8}  {'R-cum':>8}  k")
+    print(f"  {'Fit':<22} {'Model':<16}  {'loss':>10}  {'R-MSD':>8}  {'R-win':>8}  {'R-cum':>8}")
     print(f"{'-'*65}")
     for name, res in all_results.items():
-        k = ALL_MODELS[name].n_params()
+        if '/' in name:
+            fit_lbl, model_lbl = name.split('/', 1)
+        else:
+            fit_lbl, model_lbl = 'pooled', name
         rcorr = res.get('train_r_corr', float('nan'))
         rcum  = res.get('train_r_corr_cum', float('nan'))
         loss  = res.get('train_total_loss', res.get('train_total_msd', float('nan')))
-        print(f"  {name:<16}  {loss:>10.5f}  "
-              f"{res['train_r_msd']:>8.5f}  {rcorr:>+8.3f}  {rcum:>+8.3f}  {k}")
+        print(f"  {fit_lbl:<22} {model_lbl:<16}  {loss:>10.5f}  "
+              f"{res['train_r_msd']:>8.5f}  {rcorr:>+8.3f}  {rcum:>+8.3f}")
     print(f"{'='*65}")
-    print(f"  Results saved → {run_dir}")
+    print(f"  Results saved -> {run_dir}")
     print(f"  Next step: python evaluate.py --run-dir {run_dir}")
+    print(f"            python plot_results.py --run-dir {run_dir} --no-show")
 
 
 if __name__ == '__main__':
