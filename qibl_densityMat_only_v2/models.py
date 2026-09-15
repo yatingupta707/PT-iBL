@@ -34,6 +34,18 @@ def alternation_series(actions: List[str]) -> np.ndarray:
     return result
 
 
+def problem_seed_base(prob_i: int, n_agents: int, n_problems: int,
+                      seed_offset: int = 0) -> int:
+    """Unique RNG block per (simulation, problem). Agent i uses seed_base + i.
+
+    Training and evaluate.py must share this formula. Reusing seed_base=0
+    for every problem makes all problems share the same n_agents RNG
+    streams, so a fitted cumulative slope does not survive published eval.
+    """
+    return (int(seed_offset) * int(n_problems) * int(n_agents)
+            + int(prob_i) * int(n_agents))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # IBL MEMORY  (guide §1.2)
 # ══════════════════════════════════════════════════════════════════════════════

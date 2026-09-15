@@ -21,7 +21,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from models import ALL_MODELS, alternation_series
+from models import ALL_MODELS, alternation_series, problem_seed_base
 
 COLS = ['id', 'val_high', 'p_high', 'val_low', 'val_safe', 'sure', 'd1', 'mode']
 
@@ -185,7 +185,7 @@ def eval_inst(dataset, model_class, params, n_trials, n_agents, n_sims):
         v_acc = np.zeros(n_trials)
         x_acc = np.zeros(n_trials)
         for prob_i, (_, row) in enumerate(dataset.iterrows()):
-            seed_base = sim * P * n_agents + prob_i * n_agents
+            seed_base = problem_seed_base(prob_i, n_agents, P, sim)
             r, a, v, x = run_one_problem(model_class, params, row, n_trials,
                                          n_agents, seed_base)
             r_acc += r; a_acc += a; v_acc += v; x_acc += x

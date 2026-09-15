@@ -10,13 +10,23 @@ Inspired by ibl_and_pt_re_parallel.py.
 USAGE
 ------
   python density_ibl_quantum_v3.py
-      (saves to runs/iteration_4 by default)
+      (saves to runs/iteration_5 by default)
 
   python density_ibl_quantum_v3.py \\
-      --run-name iteration_4 --n-epochs 100 --n-agents 10 --pop-size 15 \\
+      --run-name iteration_5 --n-epochs 100 --n-agents 10 --pop-size 15 \\
       --optimizer de --shape-weight 0.1 --score-window 5 --cum-shape-weight 0.15 \\
-      --warm-start runs/iteration_3 \\
+      --freeze-p-reveal --warm-start runs/iteration_4 \\
       --models IBL PTiBL IBLQuantum PTIBLQuantum
+
+  Fit tDCS_0 humans only (needed if you judge plot_tDCS_0_*.png):
+      python density_ibl_quantum_v3.py --run-name iteration_5_tdcs0 \\
+          --fit-condition tDCS_0_load_0 --freeze-p-reveal \\
+          --warm-start runs/iteration_4
+
+  Nested test (PTIBLQuantum with theta=0):
+      python density_ibl_quantum_v3.py --run-name iteration_5_theta0 \\
+          --models PTIBLQuantum --freeze-theta --freeze-p-reveal \\
+          --warm-start runs/iteration_4
 
   Debug with few agents (inspect learning, not a full fit):
       python density_ibl_quantum_v3.py --debug --n-epochs 8 --models IBL
@@ -54,11 +64,12 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from models import (PTiBL, IBLQuantum, PTIBLQuantum, iBL, ALL_MODELS,
-                    alternation_series)
+                    alternation_series, problem_seed_base)
 from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp, human_reveal_ts_est,
     human_r_inst_est, human_a_inst_est, human_reveal_inst_est,
+    human_condition_series,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -73,6 +84,9 @@ SHAPE_WEIGHT = float(os.environ.get('PTIBL_SHAPE_WEIGHT', '0.1'))
 SCORE_WINDOW = int(os.environ.get('PTIBL_SCORE_WINDOW', '5'))
 CUM_SHAPE_WEIGHT = float(os.environ.get('PTIBL_CUM_SHAPE_WEIGHT', '0.15'))
 DEBUG_MODE = os.environ.get('PTIBL_DEBUG', '0') == '1'
+FREEZE_P_REVEAL = os.environ.get('PTIBL_FREEZE_P_REVEAL', '1') == '1'
+FREEZE_THETA = os.environ.get('PTIBL_FREEZE_THETA', '0') == '1'
+FIT_CONDITION = os.environ.get('PTIBL_FIT_CONDITION', '').strip()
 _DATA_DIR = os.environ.get('PTIBL_DATA_DIR', 'data')
 
 
@@ -150,7 +164,7 @@ def _smooth_ts(inst):
 
 
 def eval_bundle(dataset: pd.DataFrame, model_class, params: dict,
-                n_agents: int = 5) -> dict:
+                n_agents: int = 5, seed_offset: int = 0) -> dict:
     """
     One simulation pass. Returns instantaneous, windowed, and cumulative rates.
 
@@ -158,14 +172,19 @@ def eval_bundle(dataset: pd.DataFrame, model_class, params: dict,
     problems and agents. Reveal counts as 0 (same coding as human risk_series).
     Windowed series are what the training loss primarily scores.
     Cumulative series are what evaluate.py / plot_results.py show.
+
+    Seeding matches evaluate.py: unique RNG block per (seed_offset, problem).
+    Do not reuse seed_base=0 across problems — that overfits  n_agents  streams.
     """
     P     = len(dataset)
     r_acc = np.zeros(N_TRIALS)
     a_acc = np.zeros(N_TRIALS)
     v_acc = np.zeros(N_TRIALS)
 
-    for _, row in dataset.iterrows():
-        r_row, a_row, v_row = _run_one_problem(model_class, params, row, n_agents)
+    for prob_i, (_, row) in enumerate(dataset.iterrows()):
+        seed_base = problem_seed_base(prob_i, n_agents, P, seed_offset)
+        r_row, a_row, v_row = _run_one_problem(
+            model_class, params, row, n_agents, seed_base)
         r_acc += r_row
         a_acc += a_row
         v_acc += v_row
@@ -212,12 +231,47 @@ def corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(c) if np.isfinite(c) else 0.0
 
 
+def _active_human():
+    """Human R/A/reveal series for the current training target.
+
+    Default is pooled load_0 (estimation set). --fit-condition uses one
+    tDCS/load slice so tDCS_0 plots are a fair overlay, not a pooled fit
+    judged on a low-R subgroup.
+    """
+    cond = FIT_CONDITION
+    if cond:
+        if cond not in human_condition_series:
+            raise RuntimeError(
+                f"Unknown --fit-condition {cond!r}. "
+                f"Valid: {sorted(human_condition_series)}"
+            )
+        s = human_condition_series[cond]
+        z = np.zeros_like(s['risk_inst'])
+        return {
+            'r_inst': s['risk_inst'],
+            'a_inst': s['alternate_inst'],
+            'v_inst': s.get('reveal_inst', z),
+            'r_cum':  s['risk'],
+            'a_cum':  s['alternate'],
+            'v_cum':  s.get('reveal', z),
+        }
+    return {
+        'r_inst': human_r_inst_est,
+        'a_inst': human_a_inst_est,
+        'v_inst': human_reveal_inst_est,
+        'r_cum':  human_r_ts_est,
+        'a_cum':  human_a_ts_est,
+        'v_cum':  human_reveal_ts_est,
+    }
+
+
 def _human_score_targets():
     """Human R/A/reveal series under the same transform used for the model."""
+    h = _active_human()
     return (
-        _smooth_ts(human_r_inst_est),
-        _smooth_ts(human_a_inst_est),
-        _smooth_ts(human_reveal_inst_est),
+        _smooth_ts(h['r_inst']),
+        _smooth_ts(h['a_inst']),
+        _smooth_ts(h['v_inst']),
     )
 
 
@@ -241,8 +295,8 @@ def _score_bundle(bundle: dict) -> dict:
     corr_a = corr(a_ts, h_a)
     msd_term   = R_WEIGHT * msd_r + (1.0 - R_WEIGHT) * (msd_a + msd_v) / 2.0
     shape_term = R_WEIGHT * (1.0 - corr_r) + (1.0 - R_WEIGHT) * (1.0 - corr_a)
-    corr_r_cum = corr(bundle['r_cum'], human_r_ts_est)
-    corr_a_cum = corr(bundle['a_cum'], human_a_ts_est)
+    corr_r_cum = corr(bundle['r_cum'], _active_human()['r_cum'])
+    corr_a_cum = corr(bundle['a_cum'], _active_human()['a_cum'])
     cum_term   = CUM_SHAPE_WEIGHT * (1.0 - corr_r_cum)
     r_inst     = bundle['r_inst']
     n          = len(r_inst)
@@ -283,27 +337,50 @@ def _score_ts(r_ts, a_ts, v_ts) -> dict:
 # MODULE-LEVEL OBJECTIVE FUNCTIONS  (must be picklable for DE workers=-1)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _effective_bounds(model_class):
+    """PARAM_BOUNDS with optional frozen coordinates collapsed to a tiny interval."""
+    bounds = [tuple(b) for b in model_class.PARAM_BOUNDS]
+    names = list(model_class.PARAM_NAMES)
+    if FREEZE_P_REVEAL and 'p_reveal' in names:
+        bounds[names.index('p_reveal')] = (0.0, 1e-6)
+    if FREEZE_THETA and 'theta' in names:
+        bounds[names.index('theta')] = (0.0, 1e-6)
+    return bounds
+
+
 def _build_params(model_class, x: np.ndarray) -> dict:
-    return {
-        name: float(np.clip(val, lo + 1e-9, hi - 1e-9))
-        for name, val, (lo, hi)
-        in zip(model_class.PARAM_NAMES, x, model_class.PARAM_BOUNDS)
-    }
+    params = {}
+    for name, val, (lo, hi) in zip(
+            model_class.PARAM_NAMES, x, _effective_bounds(model_class)):
+        if hi <= lo + 1e-8:
+            params[name] = float(lo)
+        else:
+            params[name] = float(np.clip(val, lo + 1e-9, hi - 1e-9))
+    if FREEZE_P_REVEAL and 'p_reveal' in params:
+        params['p_reveal'] = 0.0
+    if FREEZE_THETA and 'theta' in params:
+        params['theta'] = 0.0
+    return params
 
 
 def _params_to_x(model_class, params: dict) -> np.ndarray:
     """Clip a saved param dict into the current bound box (for warm-start)."""
     defaults = dict(zip(model_class.PARAM_NAMES, model_class.PARAM_DEFAULT))
+    bounds = _effective_bounds(model_class)
     x = []
-    for name, (lo, hi) in zip(model_class.PARAM_NAMES, model_class.PARAM_BOUNDS):
+    for name, (lo, hi) in zip(model_class.PARAM_NAMES, bounds):
         val = float(params[name]) if name in params else float(defaults[name])
+        if name == 'p_reveal' and FREEZE_P_REVEAL:
+            val = 0.0
+        if name == 'theta' and FREEZE_THETA:
+            val = 0.0
         x.append(float(np.clip(val, lo + 1e-9, hi - 1e-9)))
     return np.asarray(x, dtype=float)
 
 
 def _init_population(model_class, popsize: int, warm_x, rng: np.random.Generator):
     """Latin-hypercube population with the previous best (and jittered copies) injected."""
-    bounds = np.asarray(model_class.PARAM_BOUNDS, dtype=float)
+    bounds = np.asarray(_effective_bounds(model_class), dtype=float)
     n = bounds.shape[0]
     m = max(int(popsize) * n, n + 1)
     lo, hi = bounds[:, 0], bounds[:, 1]
@@ -409,7 +486,7 @@ def train_model(model_name: str, model_dir: str,
     """
     model_class = ALL_MODELS[model_name]
     obj_fn      = _OBJ_FN[model_name]
-    bounds      = model_class.PARAM_BOUNDS
+    bounds      = _effective_bounds(model_class)
     os.makedirs(model_dir, exist_ok=True)
 
     loss_history = {'de_generations': [], 'nm_polish': None,
@@ -552,6 +629,9 @@ def train_model(model_name: str, model_dir: str,
         'shape_weight':     SHAPE_WEIGHT,
         'score_window':     SCORE_WINDOW,
         'cum_shape_weight': CUM_SHAPE_WEIGHT,
+        'freeze_p_reveal':  FREEZE_P_REVEAL,
+        'freeze_theta':     FREEZE_THETA,
+        'fit_condition':    FIT_CONDITION or None,
         'warm_start':       warm_dir,
         'train_total_loss': round(best_loss, 6),
         'train_total_msd':  round(sc_final['msd_term'], 6),
@@ -607,59 +687,53 @@ Notes for this training run. Written when the run directory was created.
 
 ## Goal
 
-Make **cumulative plot shapes** match humans, without going back to fitting
-only on full-history cumulative rates.
+Make **published cumulative** R/A curves match humans. iteration_4's
+`train_r_corr_cum ≈ +0.90` was an artefact: training reused `seed_base=0`
+on every problem (10 RNG streams copied 60 times). `evaluate.py` uses a
+unique seed per problem, so IBL / PTiBL / PTIBLQuantum flipped to
+**−0.80 to −0.86**. IBLQuantum stayed positive because it actually learns.
 
-iteration_3 trained on a 5-trial window. Windowed R-corr went positive
-(~+0.48 to +0.54) but **cumulative** R-corr on the published plots stayed
-negative for IBL / PTiBL / PTIBLQuantum (about -0.81 to -0.86). The model
-was learning local 5-trial wiggles while the global slope (what the PNG
-shows) still rose as humans fell.
+## What changed versus iteration 4
 
-## What changed versus iteration 3
+### 1. Training seeds now match evaluate.py
 
-### 1. Hybrid loss: windowed primary + cumulative slope guard
+`eval_bundle` uses `problem_seed_base(prob_i, n_agents, n_problems, seed_offset)`
+— the same formula as `evaluate.py`. Loss weights are **unchanged**.
 
-```
-loss = MSD_window + shape_weight * (1 - corr_window)
-     + cum_shape_weight * (1 - R-corr_cumulative)
-```
+### 2. `p_reveal` frozen at 0 (default)
 
-- `score_window = {args.score_window}`  (still the primary scoring space)
-- `shape_weight = {args.shape_weight}`
-- `cum_shape_weight = {args.cum_shape_weight}`  (0 disables the guard)
-- Cumulative remains visualization-only in evaluate/plot; the new term
-  only stops DE from inverting the published slope.
+Coin-flip reveal is scored as R=0 and cannot create a declining slope.
+iteration_4 fitted `p_reveal ≈ 0.18–0.21`, which biased the level and,
+under shared seeds, the fake first-trial R=0.70. Disable with
+`--no-freeze-p-reveal`.
 
-### 2. Richer training log (no gradients — DE is derivative-free)
+### 3. Optional `--fit-condition tDCS_0_load_0`
 
-Each generation now records early/late r_inst, realised reveal rate,
-windowed vs cumulative R-corr, and param L2 step.
-
-### 3. `--debug` dumps 3-agent trial traces
-
-`--debug` forces few agents and writes `debug_agent_trace_genXXX.json`
-for the first three generations.
+Pooled load_0 humans (mean R ≈ 0.42) cannot match tDCS_0_load_0
+(mean R ≈ 0.34). Judge pooled fits on `plot_estimation_set.png`.
+Use `--fit-condition` only if tDCS_0 figures are the deliverable.
 
 ## Search settings
 
-| setting           | iteration 3 | this run |
+| setting           | iteration 4 | this run |
 |-------------------|-------------|----------|
-| scoring           | window-5    | window-{args.score_window} + cum-slope |
+| problem seeds     | shared 0    | unique (evaluate.py) |
+| freeze_p_reveal   | no          | {getattr(args, 'freeze_p_reveal', True)} |
+| freeze_theta      | no          | {getattr(args, 'freeze_theta', False)} |
+| fit_condition     | pooled load_0 | {getattr(args, 'fit_condition', None) or 'pooled load_0'} |
+| score_window      | 5           | {args.score_window} |
 | shape_weight      | 0.1         | {args.shape_weight} |
-| cum_shape_weight  | 0           | {args.cum_shape_weight} |
+| cum_shape_weight  | 0.15        | {args.cum_shape_weight} |
 | n_agents          | 10          | {args.n_agents} |
 | pop_size          | 15          | {args.pop_size} |
 | n_epochs          | 100         | {args.n_epochs} |
-| warm_start        | iteration_2 | {args.warm_start} |
+| warm_start        | iteration_3 | {args.warm_start} |
 
 ## What did not change
 
-- Default plot files are still cumulative overlays
+- Default plot files are still cumulative overlays (R|A, all models)
 - Reveal is still R=0 in the R-rate (same as human `risk_series`)
-- Training is still on **pooled load_0** (tDCS_0 + tDCS_1). Per-condition
-  plots (especially tDCS_0 vs tDCS_1) will not match unless we fit
-  conditions separately.
+- Do not raise n_agents as the main lever; DE has no gradients
 
 ## How to evaluate, plot, debug
 
@@ -669,6 +743,8 @@ python plot_results.py --run-dir {run_dir} --no-show
 python plot_results.py --run-dir {run_dir} --rate win --no-show
 python debug_loss_isolated.py --run-dir {run_dir} --n-agents 3 --n-sims 1
 ```
+
+Judge pooled fits on `plot_estimation_set.png`, not on `plot_tDCS_0_*`.
 
 ## Models
 
@@ -693,8 +769,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Train PT-IBL-Quantum model family on estimation set.'
     )
-    parser.add_argument('--run-name',   default='iteration_4',
-                         help='Run folder name under --runs-dir (default: iteration_4)')
+    parser.add_argument('--run-name',   default='iteration_5',
+                         help='Run folder name under --runs-dir (default: iteration_5)')
     parser.add_argument('--n-epochs',   type=int, default=100,
                          help='DE maxiter (number of generations)')
     parser.add_argument('--n-agents',   type=int, default=10,
@@ -713,9 +789,21 @@ def main():
     parser.add_argument('--cum-shape-weight', type=float, default=0.15,
                          help='Extra penalty on (1 - cumulative R-corr) so published '
                               'cumulative plots cannot invert slope. 0 disables it.')
-    parser.add_argument('--warm-start', default='runs/iteration_3',
+    parser.add_argument('--warm-start', default='runs/iteration_4',
                          help='Previous run directory whose best_params.json seed the '
-                              'DE population (e.g. runs/iteration_3)')
+                              'DE population. Use "none" for a fresh Latin hypercube.')
+    parser.add_argument('--freeze-p-reveal', dest='freeze_p_reveal',
+                         action='store_true',
+                         help='Force p_reveal=0 (default). Coin-flip reveal biases R-rate.')
+    parser.add_argument('--no-freeze-p-reveal', dest='freeze_p_reveal',
+                         action='store_false',
+                         help='Allow DE to fit p_reveal in [0, 1].')
+    parser.set_defaults(freeze_p_reveal=True)
+    parser.add_argument('--freeze-theta', action='store_true',
+                         help='Force quantum theta=0 (nested test: density rotation off).')
+    parser.add_argument('--fit-condition', default='',
+                         help='Human target condition (e.g. tDCS_0_load_0). '
+                              'Default empty = pooled load_0 estimation set.')
     parser.add_argument('--optimizer',  choices=['de', 'de+nm'], default='de',
                          help='de = DE only; de+nm = DE + Nelder-Mead polish')
     parser.add_argument('--models',     nargs='+',
@@ -743,15 +831,28 @@ def main():
         print('  DEBUG MODE: n_agents=%d, single-process, agent traces on gens 1-3'
               % args.n_agents)
 
+    if args.warm_start and str(args.warm_start).lower() in ('none', 'off', '-', ''):
+        args.warm_start = None
+
+    if args.fit_condition and args.fit_condition not in human_condition_series:
+        parser.error(
+            f"Unknown --fit-condition {args.fit_condition!r}. "
+            f"Valid: {sorted(human_condition_series)}"
+        )
+
     # ── Set module-level config AND env vars (inherited by DE workers) ───────
     global N_AGENTS, R_WEIGHT, SHAPE_WEIGHT, SCORE_WINDOW, CUM_SHAPE_WEIGHT
-    global DEBUG_MODE, _EST, _COMP, _DATA_DIR
+    global DEBUG_MODE, FREEZE_P_REVEAL, FREEZE_THETA, FIT_CONDITION
+    global _EST, _COMP, _DATA_DIR
     N_AGENTS     = args.n_agents
     R_WEIGHT     = args.r_weight
     SHAPE_WEIGHT = args.shape_weight
     SCORE_WINDOW = args.score_window
     CUM_SHAPE_WEIGHT = args.cum_shape_weight
     DEBUG_MODE   = bool(args.debug)
+    FREEZE_P_REVEAL = bool(args.freeze_p_reveal)
+    FREEZE_THETA = bool(args.freeze_theta)
+    FIT_CONDITION = (args.fit_condition or '').strip()
     _DATA_DIR    = args.data_dir
     os.environ['PTIBL_N_AGENTS']      = str(args.n_agents)
     os.environ['PTIBL_R_WEIGHT']      = str(args.r_weight)
@@ -759,6 +860,9 @@ def main():
     os.environ['PTIBL_SCORE_WINDOW']  = str(args.score_window)
     os.environ['PTIBL_CUM_SHAPE_WEIGHT'] = str(args.cum_shape_weight)
     os.environ['PTIBL_DEBUG']         = '1' if args.debug else '0'
+    os.environ['PTIBL_FREEZE_P_REVEAL'] = '1' if args.freeze_p_reveal else '0'
+    os.environ['PTIBL_FREEZE_THETA']  = '1' if args.freeze_theta else '0'
+    os.environ['PTIBL_FIT_CONDITION'] = FIT_CONDITION
     os.environ['PTIBL_DATA_DIR']      = args.data_dir
     os.environ['POP_SIZE']            = str(args.pop_size)
 
@@ -770,6 +874,8 @@ def main():
     print(f"  n_agents={args.n_agents}  pop_size={args.pop_size}  "
           f"shape_weight={args.shape_weight}  cum_shape_weight={args.cum_shape_weight}  "
           f"score={score_label}  warm_start={args.warm_start}")
+    print(f"  freeze_p_reveal={args.freeze_p_reveal}  freeze_theta={args.freeze_theta}  "
+          f"fit_condition={FIT_CONDITION or 'pooled load_0'}")
 
     # ── Create run directory (folder name is exactly --run-name) ─────────────
     run_label = args.run_name
@@ -794,6 +900,9 @@ def main():
             'shape_weight': args.shape_weight,
             'score_window': args.score_window,
             'cum_shape_weight': args.cum_shape_weight,
+            'freeze_p_reveal': args.freeze_p_reveal,
+            'freeze_theta': args.freeze_theta,
+            'fit_condition': args.fit_condition or None,
             'warm_start':   args.warm_start,
             'models':       args.models,
             'n_epochs':  args.n_epochs,
@@ -831,14 +940,14 @@ def main():
         ckpt['completed_models'].append(model_name)
         ckpt[f'{model_name}_completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
         _save_checkpoint(ckpt_path, ckpt)
-        print(f"  ✓ Checkpoint updated: {model_name} saved")
+        print(f"  Checkpoint updated: {model_name} saved")
 
     # ── Final summary ─────────────────────────────────────────────────────────
-    print(f"\n{'═'*65}")
-    print(f"  TRAINING COMPLETE — {run_label}")
-    print(f"{'─'*65}")
+    print(f"\n{'='*65}")
+    print(f"  TRAINING COMPLETE -- {run_label}")
+    print(f"{'-'*65}")
     print(f"  {'Model':<16}  {'loss':>10}  {'R-MSD':>8}  {'R-win':>8}  {'R-cum':>8}  k")
-    print(f"{'─'*65}")
+    print(f"{'-'*65}")
     for name, res in all_results.items():
         k = ALL_MODELS[name].n_params()
         rcorr = res.get('train_r_corr', float('nan'))
@@ -846,7 +955,7 @@ def main():
         loss  = res.get('train_total_loss', res.get('train_total_msd', float('nan')))
         print(f"  {name:<16}  {loss:>10.5f}  "
               f"{res['train_r_msd']:>8.5f}  {rcorr:>+8.3f}  {rcum:>+8.3f}  {k}")
-    print(f"{'═'*65}")
+    print(f"{'='*65}")
     print(f"  Results saved → {run_dir}")
     print(f"  Next step: python evaluate.py --run-dir {run_dir}")
 

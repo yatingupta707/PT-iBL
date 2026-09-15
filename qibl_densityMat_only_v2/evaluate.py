@@ -32,7 +32,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from models import ALL_MODELS, alternation_series
+from models import ALL_MODELS, alternation_series, problem_seed_base
 from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp,
@@ -91,7 +91,7 @@ def eval_ts_once(dataset, model_class, params, n_agents, seed_offset=0):
     v_acc = np.zeros(N_TRIALS)
 
     for prob_i, (_, row) in enumerate(dataset.iterrows()):
-        seed_base = seed_offset * P * n_agents + prob_i * n_agents
+        seed_base = problem_seed_base(prob_i, n_agents, P, seed_offset)
         r_row, a_row, v_row = _run_one_problem(model_class, params, row,
                             n_agents, seed_base)
         r_acc += r_row
@@ -315,19 +315,19 @@ def main():
         json.dump(all_summaries, f, indent=2)
 
     # Print comparison table
-    print(f"\n{'═'*70}")
-    print(f"  EVALUATION SUMMARY — {os.path.basename(args.run_dir)}")
-    print(f"{'─'*70}")
+    print(f"\n{'='*70}")
+    print(f"  EVALUATION SUMMARY -- {os.path.basename(args.run_dir)}")
+    print(f"{'-'*70}")
     hdr = f"  {'Model':<16} {'Set':<8} {'R-MSD':>8} {'R-corr':>7} {'A-MSD':>8} {'A-corr':>7}"
     print(hdr)
-    print(f"{'─'*70}")
+    print(f"{'-'*70}")
     for name, s in all_summaries.items():
         for split, label in [('train', 'Train'), ('test', 'Test')]:
             sr, sa = s[split]['r_rate'], s[split]['a_rate']
             print(f"  {name:<16} {label:<8} "
                   f"{sr['msd']:>8.5f} {sr['corr']:>7.3f} "
                   f"{sa['msd']:>8.5f} {sa['corr']:>7.3f}")
-    print(f"{'═'*70}")
+    print(f"{'='*70}")
     print(f"  Saved: {combined_path}")
     print(f"  Next step: python plot_results.py --run-dir {args.run_dir}")
 

@@ -248,6 +248,13 @@ def main():
         print("  No test-set time series available — skipping comp plot.")
 
     # Produce one two-panel figure for each exact tDCS/load condition.
+    # These overlay models trained on pooled load_0 / load_1. They are not
+    # a fair judgement of a pooled fit; use plot_estimation_set.png for that.
+    if human_condition_series:
+        print('  Note: plot_tDCS_* overlays pooled-fit models on condition-specific')
+        print('  humans. Judge pooled training on plot_estimation_set.png /')
+        print('  plot_competition_set.png. Fit --fit-condition tDCS_0_load_0 if')
+        print('  the tDCS_0 figures are the deliverable.')
     for condition, human_series in sorted(human_condition_series.items()):
         split = 'train' if condition.endswith('load_0') else 'test'
         condition_models = train_models if split == 'train' else test_models

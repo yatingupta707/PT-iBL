@@ -122,12 +122,15 @@ def _load_combined_human_data():
             len(ast.literal_eval(row['risk_series'])) for row in condition_rows
         )
         risk = _series_mean(condition_rows, 'risk_series', condition_trials)
+        reveal = _series_mean(condition_rows, 'reveal_series', condition_trials)
         alternate = _series_mean(condition_rows, 'alt_series', condition_trials)
         div = np.arange(1, condition_trials + 1)
         result['conditions'][condition] = {
             'risk_inst': risk,
+            'reveal_inst': reveal,
             'alternate_inst': alternate,
             'risk': np.cumsum(risk) / div,
+            'reveal': np.cumsum(reveal) / div,
             'alternate': np.cumsum(alternate) / div,
         }
     return result
