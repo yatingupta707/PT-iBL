@@ -21,31 +21,6 @@ from typing import Dict, List, Optional, Tuple, Type
 import numpy as np
 
 
-def alternation_series(actions: List[str]) -> np.ndarray:
-    """Return alternations between committed choices, ignoring reveals."""
-    result = np.zeros(len(actions), dtype=float)
-    previous_choice = None
-    for trial, action in enumerate(actions):
-        if action == 'reveal':
-            continue
-        if previous_choice is not None:
-            result[trial] = float(action != previous_choice)
-        previous_choice = action
-    return result
-
-
-def problem_seed_base(prob_i: int, n_agents: int, n_problems: int,
-                      seed_offset: int = 0) -> int:
-    """Unique RNG block per (simulation, problem). Agent i uses seed_base + i.
-
-    Training and evaluate.py must share this formula. Reusing seed_base=0
-    for every problem makes all problems share the same n_agents RNG
-    streams, so a fitted cumulative slope does not survive published eval.
-    """
-    return (int(seed_offset) * int(n_problems) * int(n_agents)
-            + int(prob_i) * int(n_agents))
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # IBL MEMORY  (guide §1.2)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -198,13 +173,12 @@ class ModelBase:
         self._last_action: Optional[str]      = None
         self.reset()
 
-    def reset(self, seed: int = 0) -> None:
-        self._memory      = self._init_memory(seed)
+    def reset(self) -> None:
+        self._memory      = self._init_memory()
         self._phase       = 0.0
         self._last_action = None
 
-    def _init_memory(self, seed: int = 0) -> IBLMemory:
-        raise NotImplementedError
+    def _init_memory(self) -> IBLMemory:     raise NotImplementedError
     def _get_value(self, x: float) -> float: raise NotImplementedError
 
     def _compute_probs(self, t: int,
@@ -220,39 +194,22 @@ class ModelBase:
                   safe_value:   float,
                   risky_values: Tuple,
                   risky_probs:  Tuple,
-                  seed: int = 0,
-                  return_trace: bool = False):
+                  seed: int = 0) -> List[str]:
         """
         Forward simulate n_trials. Returns list of action strings.
         Uses stochastic memory retrieval (sigma_s active).
-
-        Memory noise and choice/outcome noise are independent streams
-        derived from `seed`, so each agent (distinct seed) is independent.
-
-        If return_trace=True, also returns a list of per-trial dicts
-        (p_risky, blended values, outcome, stored value, phase).
-        Differential Evolution has no gradients; this trace is how we
-        inspect agent-level learning.
         """
-        ss = np.random.SeedSequence(int(seed))
-        mem_ss, choice_ss = ss.spawn(2)
-        self.reset(seed=int(mem_ss.generate_state(1)[0]))
-        rng     = np.random.default_rng(choice_ss)
+        self.reset()
+        rng     = np.random.default_rng(seed)
         actions = []
-        traces  = []
         for t in range(n_trials):
             mu = self._memory.retrieve(self.options, t, deterministic=False)
             _, p_risky = self._compute_probs(t, mu)
-            p_risky = float(p_risky)
 
-            p_reveal = float(np.clip(self.params.get('p_reveal', 0.0), 0.0, 1.0))
-            if p_reveal > 0.0 and rng.random() < p_reveal:
-                action = 'reveal'
-            else:
-                action = 'risky' if rng.random() < p_risky else 'safe'
+            action = 'risky' if rng.random() < p_risky else 'safe'
             actions.append(action)
 
-            if action in ('risky', 'reveal'):
+            if action == 'risky':
                 idx     = rng.choice(len(risky_values),
                                       p=np.array(risky_probs, dtype=float))
                 outcome = float(risky_values[idx])
@@ -260,27 +217,9 @@ class ModelBase:
                 outcome = float(safe_value)
 
             value = self._get_value(outcome)
-            phase_before = float(self._phase)
-            update_action = 'risky' if action == 'reveal' else action
-            self._update_state(t, update_action, outcome, value, mu, p_risky)
+            self._update_state(t, action, outcome, value, mu, p_risky)
             self._last_action = action
-            if return_trace:
-                traces.append({
-                    't':            t,
-                    'action':       action,
-                    'p_risky':      p_risky,
-                    'mu_safe':      float(mu.get('safe', 0.0)),
-                    'mu_risky':     float(mu.get('risky', 0.0)),
-                    'outcome':      outcome,
-                    'value':        float(value),
-                    'phase_before': phase_before,
-                    'phase_after':  float(self._phase),
-                    'chose_risky':  1.0 if action == 'risky' else 0.0,
-                    'chose_reveal': 1.0 if action == 'reveal' else 0.0,
-                })
 
-        if return_trace:
-            return actions, traces
         return actions
 
     @classmethod
@@ -306,15 +245,14 @@ class PTiBL(ModelBase):
     Parameters (6): α,b, λ, d, σ_s, τ, κ
     """
     MODEL_NAME    = 'PTiBL'
-    PARAM_NAMES   = ['alpha', 'beta', 'lambda_', 'd', 'sigma_s', 'tau', 'kappa',
-                     'p_reveal']
+    PARAM_NAMES   = ['alpha', 'beta', 'lambda_', 'd', 'sigma_s', 'tau', 'kappa']
     PARAM_BOUNDS  = [(0.01, 1.0), (0.01, 1.0), (0.01, 5.0), (0.01, 5.0),
-                      (0.0, 5.0), (0.05, 5.0), (0.01, 10.0), (0.0, 1.0)]
-    PARAM_DEFAULT = [0.88, 0.88, 2.25, 0.50, 0.45, 1.0, 1.0, 0.0]
+                      (0.0, 5.0), (0.1, 5.0), (0.01, 10.0)]
+    PARAM_DEFAULT = [0.88, 0.88, 2.25, 0.50, 0.45, 1.0, 1.0]
 
-    def _init_memory(self, seed: int = 0) -> IBLMemory:
+    def _init_memory(self) -> IBLMemory:
         return IBLMemory(d=self.params['d'], sigma_s=self.params['sigma_s'],
-                          tau=self.params['tau'], seed=seed)
+                          tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
         a, b, l = self.params['alpha'], self.params['beta'], self.params['lambda_']
@@ -343,13 +281,12 @@ class iBL(ModelBase):
     Parameters (4): d, σ_s, τ, κ
     """
     MODEL_NAME    = 'iBL'
-    PARAM_NAMES   = [ 'd', 'sigma_s', 'tau', 'kappa', 'p_reveal']
-    PARAM_BOUNDS  = [ (0.01, 5.0), (0.01, 5.0), (0.05, 5.0), (0.01, 10.0),
-                      (0.0, 1.0)]
-    PARAM_DEFAULT = [0.50, 0.45, 1.0, 1.0, 0.0]
-    def _init_memory(self, seed: int = 0) -> IBLMemory:
+    PARAM_NAMES   = [ 'd', 'sigma_s', 'tau', 'kappa']
+    PARAM_BOUNDS  = [ (0.01, 5.0), (0.01, 5.0), (0.1, 5.0), (0.01, 10.0)]
+    PARAM_DEFAULT = [0.50, 0.45, 1.0, 1.0]
+    def _init_memory(self) -> IBLMemory:
         return IBLMemory(d=self.params['d'], sigma_s=self.params['sigma_s'],
-                          tau=self.params['tau'], seed=seed)
+                          tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
         return float(x)
@@ -381,25 +318,24 @@ class IBLQuantum(ModelBase):
     """
     MODEL_NAME    = 'IBLQuantum'
     PARAM_NAMES   = ['d', 'sigma_s', 'tau', 'beta_q', 'theta',
-                      'omega', 'eta_delta', 'eta_c', 'lambda_d', 'p_reveal']
-    PARAM_BOUNDS  = [(0.01, 5.0), (0.01, 5.0), (0.05, 5.0),
+                      'omega', 'eta_delta', 'eta_c', 'lambda_d']
+    PARAM_BOUNDS  = [(0.01, 5.0), (0.01, 5.0), (0.1, 5.0),
                       (0.01, 10.0), (0.0, np.pi / 2),
-                      (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
-                      (0.0, 1.0)]
+                      (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]
     PARAM_DEFAULT = [0.5, 0.45, 1.0, 1.0, np.pi / 4,
-                      0.9, 0.1, 0.05, 0.1, 0.0]
+                      0.9, 0.1, 0.05, 0.1]
 
     def __init__(self, params):
         self._dm = DensityMatrix()
         super().__init__(params)
 
-    def reset(self, seed: int = 0):
-        super().reset(seed)
+    def reset(self):
+        super().reset()
         self._dm.reset(phi_init=0.0)
 
-    def _init_memory(self, seed: int = 0) -> IBLMemory:
+    def _init_memory(self) -> IBLMemory:
         return IBLMemory(d=self.params['d'], sigma_s=self.params['sigma_s'],
-                          tau=self.params['tau'], seed=seed)
+                          tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
         return float(x)   # raw, no PT
@@ -435,27 +371,25 @@ class PTIBLQuantum(ModelBase):
     """
     MODEL_NAME    = 'PTIBLQuantum'
     PARAM_NAMES   = ['alpha','beta', 'lambda_', 'd', 'sigma_s', 'tau',
-                      'beta_q', 'theta', 'omega', 'eta_delta', 'eta_c', 'lambda_d',
-                      'p_reveal']
-    PARAM_BOUNDS  = [(0.01, 1.0), (0.01, 1.0), (0.01, 5.0), (0.01, 5.0),
-                      (0.0, 5.0), (0.05, 5.0),
+                      'beta_q', 'theta', 'omega', 'eta_delta', 'eta_c', 'lambda_d']
+    PARAM_BOUNDS  = [(0.01, 1.0),(0.01, 1.0), (0.01, 1.0), (0.01, 2.0),
+                      (0.0, 2.0), (0.1, 5.0),
                       (0.01, 10.0), (0.0, np.pi / 2),
-                      (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
-                      (0.0, 1.0)]
-    PARAM_DEFAULT = [0.88, 0.88, 2.25, 0.5, 0.45, 1.0,
-                      1.0, np.pi / 4, 0.9, 0.1, 0.05, 0.1, 0.0]
+                      (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]
+    PARAM_DEFAULT = [0.88,0.88, 2.25, 0.5, 0.45, 1.0,
+                      1.0, np.pi / 4, 0.9, 0.1, 0.05, 0.1]
 
     def __init__(self, params):
         self._dm = DensityMatrix()
         super().__init__(params)
 
-    def reset(self, seed: int = 0):
-        super().reset(seed)
+    def reset(self):
+        super().reset()
         self._dm.reset(phi_init=0.0)
 
-    def _init_memory(self, seed: int = 0) -> IBLMemory:
+    def _init_memory(self) -> IBLMemory:
         return IBLMemory(d=self.params['d'], sigma_s=self.params['sigma_s'],
-                          tau=self.params['tau'], seed=seed)
+                          tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
         a, b, l = self.params['alpha'], self.params['beta'], self.params['lambda_']
