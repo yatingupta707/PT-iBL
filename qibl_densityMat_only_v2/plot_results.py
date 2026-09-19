@@ -3,19 +3,24 @@ plot_results.py
 ══════════════════════════════════════════════════════════════════════════════
 Loads evaluated behavioural time series and plots them against human data.
 
-Produces two figures (saved as PNG inside the run directory):
-  plot_estimation_set.png   — R-rate and A-rate on training set
-  plot_competition_set.png  — R-rate and A-rate on test set
+Primary output: one two-panel figure per tDCS/load condition (4 figures,
+8 graphs). Each figure overlays humans (black) with all four models.
 
-Each plot shows:
-  • Human data   — black solid line
-  • Each model   — distinct coloured line
+  plot_tDCS_0_load_0.png
+  plot_tDCS_1_load_0.png   — models use estimation-set (load_0) simulations
+  plot_tDCS_0_load_1.png
+  plot_tDCS_1_load_1.png   — models use competition-set (load_1) simulations
+
+Also writes the original pooled overlays:
+  plot_estimation_set.png
+  plot_competition_set.png
+
+Style matches the original pipeline: cumulative R-rate | cumulative A-rate,
+dashed coloured model lines, no rescaling.
 
 USAGE
-──────
-  python plot_results.py --run-dir runs/exp1_15epochs
-  python plot_results.py --run-dir runs/exp1_15epochs --output-dir my_plots
-  python plot_results.py --run-dir runs/exp1_15epochs --no-show   # save only
+------
+  python plot_results.py --run-dir runs/exp1_15epochs --no-show
 """
 
 import argparse, os, sys
@@ -30,14 +35,14 @@ if _HERE not in sys.path:
 from human_metrics import (
     human_r_ts_est, human_a_ts_est,
     human_r_ts_comp, human_a_ts_comp,
+    human_condition_series, CONDITION_NAMES, condition_problem_split,
 )
 
-# ── Colour palette (one per model) ────────────────────────────────────────────
 MODEL_COLOURS = {
-    "IBL":          "#c4c804",   # yellowish
-    'PTiBL':        '#e05252',   # red
-    'IBLQuantum':   '#4c8edb',   # blue
-    'PTIBLQuantum': '#4cb87a',   # green
+    "IBL":          "#c4c804",
+    'PTiBL':        '#e05252',
+    'IBLQuantum':   '#4c8edb',
+    'PTIBLQuantum': '#4cb87a',
 }
 DEFAULT_COLOURS = ['#e05252', '#4c8edb', '#4cb87a',
                     '#e09c40', '#9b59b6', '#34a49e']
@@ -47,11 +52,9 @@ def _colour(name: str, idx: int) -> str:
     return MODEL_COLOURS.get(name, DEFAULT_COLOURS[idx % len(DEFAULT_COLOURS)])
 
 
-# ── Single figure: 1 row × 2 cols (R-rate | A-rate) ──────────────────────────
-
 def _make_figure(title: str,
                   human_r: np.ndarray, human_a: np.ndarray,
-                  models: list,              # list of (name, r_ts, a_ts)
+                  models: list,
                   output_path: str,
                   show: bool = True) -> None:
     N      = len(human_r)
@@ -70,6 +73,9 @@ def _make_figure(title: str,
         for idx, (mname, r_ts, a_ts) in enumerate(models):
             ts = r_ts if metric == 'R-rate' else a_ts
             if ts is None:
+                continue
+            ts = np.asarray(ts, dtype=float)[:N]
+            if len(ts) != N:
                 continue
             ax.plot(trials, ts,
                      color     = _colour(mname, idx),
@@ -93,13 +99,7 @@ def _make_figure(title: str,
     plt.close(fig)
 
 
-# ── Load model time series ────────────────────────────────────────────────────
-
 def _load_model_ts(model_dir: str, split: str):
-    """
-    Load npy time series for one model and one set split.
-    Returns (r_ts, a_ts) or (None, None) if files are missing.
-    """
     r_path = os.path.join(model_dir, f'eval_{split}_r_ts.npy')
     a_path = os.path.join(model_dir, f'eval_{split}_a_ts.npy')
     if not (os.path.exists(r_path) and os.path.exists(a_path)):
@@ -107,14 +107,12 @@ def _load_model_ts(model_dir: str, split: str):
     return np.load(r_path), np.load(a_path)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
         description='Plot model behavioural time series vs human data.'
     )
     parser.add_argument('--run-dir',    required=True,
-                         help='Training run directory (e.g. runs/exp1_15epochs)')
+                         help='Training run directory')
     parser.add_argument('--output-dir', default=None,
                          help='Where to save plots (default: inside run-dir)')
     parser.add_argument('--models',     nargs='*', default=None,
@@ -130,7 +128,6 @@ def main():
     output_dir = args.output_dir or args.run_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # Auto-detect model subdirectories
     if args.models:
         model_names = args.models
     else:
@@ -146,9 +143,7 @@ def main():
 
     print(f"  Models found: {model_names}")
 
-    # ── Load time series for both splits ─────────────────────────────────────
     def load_split(split: str) -> list:
-        """Returns list of (model_name, r_ts, a_ts)."""
         entries = []
         for name in model_names:
             model_dir = os.path.join(args.run_dir, name)
@@ -165,10 +160,9 @@ def main():
     run_label = os.path.basename(args.run_dir)
     show      = not args.no_show
 
-    # ── Estimation set plot ───────────────────────────────────────────────────
     if train_models:
         _make_figure(
-            title       = f'Estimation set (training)  —  {run_label}',
+            title       = f'Estimation set (load_0, pooled)  —  {run_label}',
             human_r     = human_r_ts_est,
             human_a     = human_a_ts_est,
             models      = train_models,
@@ -178,10 +172,9 @@ def main():
     else:
         print("  No training-set time series available — skipping est plot.")
 
-    # ── Competition set plot ──────────────────────────────────────────────────
     if test_models:
         _make_figure(
-            title       = f'Competition set (test)  —  {run_label}',
+            title       = f'Competition set (load_1, pooled)  —  {run_label}',
             human_r     = human_r_ts_comp,
             human_a     = human_a_ts_comp,
             models      = test_models,
@@ -190,6 +183,28 @@ def main():
         )
     else:
         print("  No test-set time series available — skipping comp plot.")
+
+    if not human_condition_series:
+        print("  No per-condition human series — skipping tDCS plots.")
+    else:
+        for condition in CONDITION_NAMES:
+            if condition not in human_condition_series:
+                continue
+            human_series = human_condition_series[condition]
+            split = condition_problem_split(condition)
+            condition_models = train_models if split == 'est' else test_models
+            if not condition_models:
+                print(f"  No {split} model series — skip {condition}")
+                continue
+            n_people = human_series.get('n_people', '?')
+            _make_figure(
+                title       = f'{condition}  (n={n_people})  —  {run_label}',
+                human_r     = human_series['risk'],
+                human_a     = human_series['alternate'],
+                models      = condition_models,
+                output_path = os.path.join(output_dir, f'plot_{condition}.png'),
+                show        = show,
+            )
 
     print(f"\n  Plots saved to: {output_dir}")
 

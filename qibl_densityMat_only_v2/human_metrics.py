@@ -1,67 +1,201 @@
 """
 human_metrics.py
 ─────────────────
-Human behavioural benchmark time series.
-All four arrays are shape (100,) — cumulative means up to each trial,
-averaged across all participants and all problems in each set.
+Human behavioural time series for the tDCS/load dataset.
 
-R-rate: cumulative proportion of risky choices
-A-rate: cumulative proportion of alternation events (choice ≠ previous choice)
+Each participant contributes one 50-trial sequence of A/B/R choices.
+A = safe, B = risky, R = reveal.
 
-REPLACE human_a_ts_est, human_r_ts_comp, human_a_ts_comp
-with your actual data from the original human_metrc.py file.
+Aggregation (same as the original 2-choice pipeline):
+  1. Instantaneous 0/1 series per person (risk, alteration)
+  2. Mean across people at each trial
+  3. Cumulative mean: cumsum(inst) / trial_index
+
+This is equivalent to averaging per-person running means, because mean
+and cumsum commute. We recompute from raw `choices`, not from the CSV
+`cum_*` columns, so reveal-aware alteration is applied uniformly.
+
+Splits
+  estimation / load_0  — pooled tDCS_0_load_0 + tDCS_1_load_0
+  competition / load_1 — pooled tDCS_0_load_1 + tDCS_1_load_1
+  conditions           — each tDCS × load cell separately
 """
 
+from __future__ import annotations
+
+import ast
+import json
+import os
+from collections import Counter
+from typing import Dict, List, Optional
+
 import numpy as np
+import pandas as pd
 
-# ── Estimation set (training) R-rate ──────────────────────────────────────────────
+from models import alternation_series, risk_series
 
-human_r_ts_est = np.array([
-    0.5175, 0.5025, 0.5200, 0.476667, 0.491667, 0.4625, 0.4950, 0.455833, 0.469167, 0.485833,
-    0.4575, 0.454167, 0.451667, 0.450833, 0.461667, 0.4525, 0.436667, 0.423333, 0.4475, 0.433333,
-    0.4325, 0.441667, 0.4325, 0.4525, 0.4375, 0.436667, 0.410833, 0.4325, 0.410833, 0.410833,
-    0.3950, 0.4100, 0.3850, 0.4000, 0.380833, 0.405833, 0.4000, 0.406667, 0.380833, 0.385833,
-    0.3700, 0.4025, 0.375833, 0.390833, 0.3925, 0.4025, 0.375833, 0.385833, 0.383333, 0.3825,
-    0.3700, 0.3750, 0.365833, 0.3750, 0.375833, 0.386667, 0.379167, 0.3825, 0.363333, 0.369167,
-    0.373333, 0.3775, 0.360833, 0.374167, 0.366667, 0.361667, 0.353333, 0.364167, 0.365833, 0.3575,
-    0.3675, 0.360833, 0.360833, 0.356667, 0.346667, 0.3500, 0.3475, 0.360833, 0.3550, 0.366667,
-    0.360833, 0.3700, 0.365833, 0.3600, 0.351667, 0.350833, 0.356667, 0.358333, 0.354167, 0.3550,
-    0.3500, 0.349167, 0.363333, 0.349167, 0.361667, 0.356667, 0.360833, 0.359167, 0.349167, 0.336667
-])
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_CSV = os.path.abspath(
+    os.path.join(_HERE, '..', 'tdcs_load_60_final_comb.csv')
+)
 
-# ── A-rate for estimation set ────────────────────────────────────
-
-human_a_ts_est = np.array([
-    0.0,0.856667,0.554167,0.426667,0.361667,0.2975,0.275833,0.259167,0.2450,0.233333,
-    0.221667,0.206667,0.190833,0.179167,0.175833,0.160833,0.175833,0.158333,0.154167,0.140833,
-    0.154167,0.1475,0.144167,0.14,0.121667,0.130833,0.119167,0.121667,0.128333,0.12,
-    0.104167,0.118333,0.118333,0.12,0.125,0.1175,0.115833,0.123333,0.115833,0.113333,
-    0.1125,0.120833,0.111667,0.095,0.118333,0.113333,0.116667,0.123333,0.109167,0.1125,
-    0.120833,0.135,0.105833,0.115833,0.1025,0.095833,0.110833,0.101667,0.110833,0.114167,
-    0.1125,0.109167,0.101667,0.108333,0.1075,0.115,0.108333,0.100833,0.116667,0.108333,
-    0.101667,0.11,0.101667,0.1025,0.098333,0.11,0.099167,0.101667,0.094167,0.093333,
-    0.1025,0.1025,0.1025,0.094167,0.093333,0.089167,0.090833,0.095,0.105833,0.084167,
-    0.095,0.099167,0.084167,0.094167,0.094167,0.086667,0.094167,0.078333,0.085,0.084167
-])
-# ── R-rate for competition set ───────────────────────────────────
-human_r_ts_comp = np.array([
-    0.49,0.50,0.48,0.49,0.48,0.46,0.45,0.44,0.44,0.43,0.45,0.43,0.43,0.43,0.43,0.43,
-    0.42,0.41,0.40,0.40,0.42,0.41,0.41,0.41,0.41,0.40,0.40,0.39,0.40,0.39,0.38,0.38,
-    0.39,0.38,0.38,0.38,0.38,0.39,0.38,0.38,0.37,0.37,0.37,0.37,0.37,0.37,0.38,0.37,
-    0.38,0.36,0.37,0.37,0.37,0.38,0.36,0.37,0.37,0.36,0.35,0.36,0.35,0.36,0.35,0.36,
-    0.35,0.35,0.35,0.37,0.37,0.36,0.35,0.34,0.34,0.35,0.34,0.33,0.34,0.36,0.36,0.35,
-    0.35,0.35,0.35,0.36,0.35,0.36,0.34,0.36,0.35,0.35,0.35,0.35,0.34,0.34,0.34,0.35,
-    0.34,0.35,0.36,0.35
-])
+CONDITION_NAMES = [
+    'tDCS_0_load_0',
+    'tDCS_1_load_0',
+    'tDCS_0_load_1',
+    'tDCS_1_load_1',
+]
 
 
-# ── A-rate for competition set ───────────────────────────────────
-human_a_ts_comp = np.array([
-    0.0,0.82,0.53,0.42,0.37,0.30,0.26,0.24,0.23,0.21,0.21,0.20,0.18,0.17,0.17,0.16,
-    0.17,0.15,0.17,0.13,0.13,0.13,0.13,0.13,0.13,0.14,0.13,0.13,0.13,0.11,0.12,0.12,
-    0.11,0.12,0.11,0.12,0.11,0.11,0.11,0.11,0.11,0.10,0.11,0.10,0.10,0.10,0.11,0.10,
-    0.10,0.10,0.10,0.11,0.08,0.10,0.10,0.10,0.11,0.10,0.10,0.10,0.09,0.10,0.10,0.10,
-    0.09,0.08,0.09,0.09,0.09,0.09,0.08,0.09,0.08,0.10,0.09,0.08,0.08,0.08,0.08,0.08,
-    0.08,0.07,0.08,0.08,0.07,0.08,0.08,0.07,0.07,0.08,0.08,0.08,0.08,0.08,0.08,0.09,
-    0.08,0.08,0.08,0.08
-])
+def condition_problem_split(condition: Optional[str]) -> str:
+    """load_0 is scored on the estimation problems; load_1 on competition."""
+    if not condition:
+        return 'est'
+    return 'est' if str(condition).endswith('load_0') else 'comp'
+
+
+def _parse_list(raw) -> list:
+    """Parse a CSV cell that stores a Python/JSON list, including trailing nan."""
+    if isinstance(raw, list):
+        values = raw
+    elif not isinstance(raw, str):
+        values = [raw]
+    else:
+        text = raw.strip()
+        try:
+            values = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            values = json.loads(
+                text.replace('nan', 'null').replace("'", '"')
+            )
+    cleaned = []
+    for item in values:
+        if item is None:
+            continue
+        if isinstance(item, float) and np.isnan(item):
+            continue
+        if isinstance(item, str) and item.lower() in ('nan', 'none', 'null', ''):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _parse_choice_list(raw) -> List[str]:
+    return [str(item).strip() for item in _parse_list(raw)]
+
+
+def cumulative_mean(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return x
+    return np.cumsum(x) / np.arange(1, len(x) + 1, dtype=float)
+
+
+def _stack_mean(series_list: List[np.ndarray], n_trials: int) -> np.ndarray:
+    if not series_list:
+        return np.zeros(n_trials, dtype=float)
+    mat = np.full((len(series_list), n_trials), np.nan, dtype=float)
+    for i, series in enumerate(series_list):
+        n = min(len(series), n_trials)
+        mat[i, :n] = np.asarray(series, dtype=float)[:n]
+    with np.errstate(all='ignore'):
+        out = np.nanmean(mat, axis=0)
+    return np.where(np.isnan(out), 0.0, out)
+
+
+def _pack(risk_inst: np.ndarray, alt_inst: np.ndarray,
+          n_people: int) -> dict:
+    return {
+        'n_people': int(n_people),
+        'n_trials': int(len(risk_inst)),
+        'risk_inst': risk_inst,
+        'alternate_inst': alt_inst,
+        'risk': cumulative_mean(risk_inst),
+        'alternate': cumulative_mean(alt_inst),
+    }
+
+
+def load_human_data(csv_path: Optional[str] = None) -> dict:
+    path = csv_path or os.environ.get('PTIBL_HUMAN_CSV', _DEFAULT_CSV)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f'Human CSV not found: {path}. '
+            'Expected tdcs_load_60_final_comb.csv next to the project folder.'
+        )
+
+    df = pd.read_csv(path)
+    if 'choices' not in df.columns or 'condition' not in df.columns:
+        raise ValueError('CSV must have columns: condition, choices')
+
+    people = []
+    for _, row in df.iterrows():
+        actions = _parse_choice_list(row['choices'])
+        if not actions:
+            continue
+        people.append({
+            'condition': str(row['condition']).strip(),
+            'pid': row.get('pid'),
+            'actions': actions,
+            'risk': risk_series(actions),
+            'alternate': alternation_series(actions),
+        })
+
+    if not people:
+        raise ValueError(f'No valid choice sequences in {path}')
+
+    # Designed experiment length is 50. A couple of rows are 51/55 because
+    # of padding; use the modal length so late trials are not all-NaN.
+    n_trials = Counter(len(p['actions']) for p in people).most_common(1)[0][0]
+
+    def subset(predicate) -> dict:
+        rows = [p for p in people if predicate(p)]
+        if not rows:
+            z = np.zeros(n_trials, dtype=float)
+            return _pack(z, z, 0)
+        return _pack(
+            _stack_mean([p['risk'] for p in rows], n_trials),
+            _stack_mean([p['alternate'] for p in rows], n_trials),
+            len(rows),
+        )
+
+    result = {
+        'csv_path': os.path.abspath(path),
+        'n_trials': n_trials,
+        'est':  subset(lambda p: p['condition'].endswith('load_0')),
+        'comp': subset(lambda p: p['condition'].endswith('load_1')),
+        'conditions': {},
+    }
+    for condition in CONDITION_NAMES:
+        result['conditions'][condition] = subset(
+            lambda p, c=condition: p['condition'] == c
+        )
+    # Include any extra condition names that appear in the file.
+    for condition in sorted({p['condition'] for p in people}):
+        if condition not in result['conditions']:
+            result['conditions'][condition] = subset(
+                lambda p, c=condition: p['condition'] == c
+            )
+    return result
+
+
+_combined_human = load_human_data()
+
+N_TRIALS = int(_combined_human['n_trials'])
+
+human_r_ts_est = _combined_human['est']['risk']
+human_a_ts_est = _combined_human['est']['alternate']
+human_r_inst_est = _combined_human['est']['risk_inst']
+human_a_inst_est = _combined_human['est']['alternate_inst']
+
+human_r_ts_comp = _combined_human['comp']['risk']
+human_a_ts_comp = _combined_human['comp']['alternate']
+human_r_inst_comp = _combined_human['comp']['risk_inst']
+human_a_inst_comp = _combined_human['comp']['alternate_inst']
+
+human_condition_series = _combined_human['conditions']
+
+
+def condition_n_trials(condition=None) -> int:
+    if not condition:
+        return int(len(human_r_ts_est))
+    return int(len(human_condition_series[condition]['risk']))

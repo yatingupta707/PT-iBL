@@ -22,6 +22,85 @@ import numpy as np
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ACTION CODING AND BEHAVIOURAL SERIES
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Humans (tDCS CSV): A = safe, B = risky, R = reveal
+# Models:            'safe', 'risky', optional 'reveal'
+#
+# Risk rate (same as the original 2-choice pipeline):
+#   1 if the trial is a risky/B choice, else 0.
+#   Reveal is NOT risky, so it contributes 0 and stays in the denominator.
+#
+# Alteration rate (updated for reveal):
+#   A reveal is never itself an alteration. Compare each committed
+#   safe/risky choice to the most recent previous committed choice:
+#     safe  -> reveal -> safe   = 0
+#     risky -> reveal -> risky  = 0
+#     safe  -> reveal -> risky  = 1  (credited on the later committed trial)
+#     risky -> reveal -> safe   = 1
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SAFE   = {'safe', 'A', 'a'}
+_RISKY  = {'risky', 'B', 'b'}
+_REVEAL = {'reveal', 'R', 'r'}
+
+
+def canonical_action(action: str) -> str:
+    """Map human letters and model strings onto {safe, risky, reveal}."""
+    token = str(action).strip()
+    if token in _SAFE:
+        return 'safe'
+    if token in _RISKY:
+        return 'risky'
+    if token in _REVEAL:
+        return 'reveal'
+    return token
+
+
+def risk_series(actions: List[str]) -> np.ndarray:
+    """Instantaneous risk indicators: 1 iff the choice is risky/B."""
+    return np.asarray(
+        [1.0 if canonical_action(a) == 'risky' else 0.0 for a in actions],
+        dtype=float,
+    )
+
+
+def alternation_series(actions: List[str]) -> np.ndarray:
+    """
+    Instantaneous alterations between committed (safe/risky) choices.
+
+    Reveal trials are 0 and do not update the committed reference.
+    The first committed choice is 0 (no predecessor).
+    """
+    n = len(actions)
+    result = np.zeros(n, dtype=float)
+    previous = None
+    for t, raw in enumerate(actions):
+        act = canonical_action(raw)
+        if act == 'reveal':
+            continue
+        if act not in ('safe', 'risky'):
+            continue
+        if previous is not None:
+            result[t] = float(act != previous)
+        previous = act
+    return result
+
+
+def problem_seed_base(prob_i: int, n_agents: int, n_problems: int,
+                      seed_offset: int = 0) -> int:
+    """Unique RNG block per (simulation, problem). Agent i uses seed_base + i."""
+    return (int(seed_offset) * int(n_problems) * int(n_agents)
+            + int(prob_i) * int(n_agents))
+
+
+def _logistic(z: float) -> float:
+    z = float(np.clip(z, -60.0, 60.0))
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # IBL MEMORY  (guide §1.2)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -202,14 +281,21 @@ class ModelBase:
         self.reset()
         rng     = np.random.default_rng(seed)
         actions = []
+        # Optional third action. Default 0 keeps original 2-choice behaviour.
+        # Reveal samples the risky lottery (information) but is scored as
+        # not-risky and is ignored by alternation_series.
+        p_reveal = float(np.clip(self.params.get('p_reveal', 0.0), 0.0, 1.0))
         for t in range(n_trials):
             mu = self._memory.retrieve(self.options, t, deterministic=False)
             _, p_risky = self._compute_probs(t, mu)
 
-            action = 'risky' if rng.random() < p_risky else 'safe'
+            if p_reveal > 0.0 and rng.random() < p_reveal:
+                action = 'reveal'
+            else:
+                action = 'risky' if rng.random() < p_risky else 'safe'
             actions.append(action)
 
-            if action == 'risky':
+            if action in ('risky', 'reveal'):
                 idx     = rng.choice(len(risky_values),
                                       p=np.array(risky_probs, dtype=float))
                 outcome = float(risky_values[idx])
@@ -217,7 +303,10 @@ class ModelBase:
                 outcome = float(safe_value)
 
             value = self._get_value(outcome)
-            self._update_state(t, action, outcome, value, mu, p_risky)
+            # Store sampled reveal outcomes on 'risky' so the observation
+            # updates the risky option; the action string remains 'reveal'.
+            store_action = 'risky' if action == 'reveal' else action
+            self._update_state(t, store_action, outcome, value, mu, p_risky)
             self._last_action = action
 
         return actions
@@ -255,12 +344,14 @@ class PTiBL(ModelBase):
                           tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
-        a, b, l = self.params['alpha'], self.params['beta'], self.params['lambda_']
+        a = self.params['alpha']
+        b = self.params.get('beta', a)
+        l = self.params['lambda_']
         return x**a if x >= 0 else -l * (-x)**b
 
     def _compute_probs(self, t, mu):
         delta = mu['risky'] - mu['safe']
-        p_r   = 1.0 / (1.0 + np.exp(-self.params['kappa'] * delta))
+        p_r   = _logistic(self.params['kappa'] * delta)
         return 1.0 - p_r, p_r
 
     def _update_state(self, t, action, raw_outcome, value, mu, p_risky):
@@ -268,7 +359,7 @@ class PTiBL(ModelBase):
         return {}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FLAVOUR 2 — PTiBL  (classical baseline)
+# FLAVOUR 2 — iBL  (classical baseline)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class iBL(ModelBase):
@@ -293,7 +384,7 @@ class iBL(ModelBase):
 
     def _compute_probs(self, t, mu):
         delta = mu['risky'] - mu['safe']
-        p_r   = 1.0 / (1.0 + np.exp(-self.params['kappa'] * delta))
+        p_r   = _logistic(self.params['kappa'] * delta)
         return 1.0 - p_r, p_r
 
     def _update_state(self, t, action, raw_outcome, value, mu, p_risky):
@@ -342,7 +433,7 @@ class IBLQuantum(ModelBase):
 
     def _compute_probs(self, t, mu):
         p     = self.params
-        q     = 1.0 / (1.0 + np.exp(-p['beta_q'] * (mu['risky'] - mu['safe'])))
+        q     = _logistic(p['beta_q'] * (mu['risky'] - mu['safe']))
         self._dm.build(q, self._phase, lambda_d=p['lambda_d'])
         return self._dm.choice_probs(p['theta'])
 
@@ -392,12 +483,14 @@ class PTIBLQuantum(ModelBase):
                           tau=self.params['tau'])
 
     def _get_value(self, x: float) -> float:
-        a, b, l = self.params['alpha'], self.params['beta'], self.params['lambda_']
+        a = self.params['alpha']
+        b = self.params.get('beta', a)
+        l = self.params['lambda_']
         return x**a if x >= 0 else -l * (-x)**b
 
     def _compute_probs(self, t, mu):
         p = self.params
-        q = 1.0 / (1.0 + np.exp(-p['beta_q'] * (mu['risky'] - mu['safe'])))
+        q = _logistic(p['beta_q'] * (mu['risky'] - mu['safe']))
         self._dm.build(q, self._phase, lambda_d=p['lambda_d'])
         return self._dm.choice_probs(p['theta'])
 
